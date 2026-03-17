@@ -126,9 +126,42 @@ def ma_cross_signals(
     return signals
 
 
+def new_high_signals(
+    price_df: pd.DataFrame,
+    entry_days: int = 50,
+    exit_days: int = 20,
+) -> List[Tuple[str, str]]:
+    """
+    N 日新高突破信号 (Donchian Channel / Turtle Trading)
+
+    收盘价创 entry_days 日新高 -> BUY
+    收盘价创 exit_days 日新低 -> SELL
+    """
+    close = price_df["close"].astype(float)
+    dates = price_df["date"].astype(str)
+
+    warmup = max(entry_days, exit_days)
+    signals = []
+    in_market = False
+
+    for i in range(warmup, len(close)):
+        high_n = close.iloc[i - entry_days:i].max()
+        low_n = close.iloc[i - exit_days:i].min()
+
+        if not in_market and close.iloc[i] >= high_n:
+            signals.append((dates.iloc[i], "BUY"))
+            in_market = True
+        elif in_market and close.iloc[i] <= low_n:
+            signals.append((dates.iloc[i], "SELL"))
+            in_market = False
+
+    return signals
+
+
 # 信号注册表: 名称 -> (函数, 默认参数)
 SIGNAL_REGISTRY: Dict[str, Tuple[Callable, dict]] = {
     "MACD": (macd_signals, {"fast": 12, "slow": 26, "signal": 9}),
     "RSI": (rsi_signals, {"period": 14, "oversold": 30, "overbought": 70}),
     "MA_Cross": (ma_cross_signals, {"short_window": 20, "long_window": 60}),
+    "New_High": (new_high_signals, {"entry_days": 50, "exit_days": 20}),
 }
