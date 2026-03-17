@@ -50,6 +50,8 @@ def main():
     parser.add_argument("--factor", type=str, help="因子名称 (如 RS_Rating_B)")
     parser.add_argument("--all-factors", action="store_true", help="扫描全部因子")
     parser.add_argument("--thresholds", type=str, help="自定义阈值 (逗号分隔, 如 90,95,98)")
+    parser.add_argument("--benchmark", type=str,
+                        help="基准 (逗号分隔, 默认: QQQ,POOL_AVG)")
     parser.add_argument("--start", type=str, help="起始日期 (YYYY-MM-DD)")
     parser.add_argument("--end", type=str, help="结束日期 (YYYY-MM-DD)")
     parser.add_argument("--freq", choices=["D", "W"], help="计算频率 (覆盖默认)")
@@ -87,6 +89,10 @@ def main():
 
     # 配置
     overrides = {}
+    if args.benchmark:
+        overrides["benchmark_symbols"] = [
+            b.strip() for b in args.benchmark.split(",")
+        ]
     if args.start:
         overrides["start_date"] = args.start
     if args.end:
@@ -119,9 +125,11 @@ def main():
             runner.set_sweep(name, custom_sweep)
 
     # 运行
+    bench_display = ", ".join(config.benchmark_symbols) if config.benchmark_symbols else "无"
     print(f"\n开始因子研究: {', '.join(factor_names)}")
     print(f"市场={config.market}, 频率={config.computation_freq}, "
-          f"Horizons={config.forward_horizons}\n")
+          f"Horizons={config.forward_horizons}")
+    print(f"基准={bench_display}\n")
 
     all_results = runner.run()
 

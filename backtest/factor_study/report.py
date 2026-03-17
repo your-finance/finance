@@ -52,22 +52,30 @@ _PROJECT_ROOT = Path(__file__).parent.parent.parent
 _OUTPUT_DIR = _PROJECT_ROOT / "data" / "factor_study"
 
 
+def _bench_display(results: FactorStudyResults) -> str:
+    """获取基准显示标签"""
+    return results.benchmark_label or ""
+
+
 # ══════════════════════════════════════════════════════════
 # 文本报告
 # ══════════════════════════════════════════════════════════
 
 def print_results(results: FactorStudyResults):
     """打印单个因子的研究结果到 stdout"""
+    bench = _bench_display(results)
+    title_suffix = f" (vs {bench})" if bench else ""
+
     print(f"\n{'='*70}")
-    print(f"  因子研究: {results.factor_name}")
+    print(f"  因子研究: {results.factor_name}{title_suffix}")
     print(f"{'='*70}")
     print(f"  市场: {results.config.market}")
     print(f"  计算频率: {results.config.computation_freq}")
     print(f"  计算日数: {results.n_computation_dates}")
     print(f"  股票数: {results.n_symbols}")
+    if bench:
+        print(f"  基准: {bench}")
     print(f"  耗时: {results.elapsed_seconds:.1f}s")
-
-    bench = results.config.benchmark_symbol
 
     # IS 日期范围
     if results.is_dates:
@@ -154,6 +162,7 @@ def export_csv(results: FactorStudyResults) -> Path:
     _OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     date_str = datetime.now().strftime("%Y%m%d")
     name = results.factor_name
+    bench = _bench_display(results)
 
     # IC results
     if results.ic_results:
@@ -161,6 +170,7 @@ def export_csv(results: FactorStudyResults) -> Path:
         for ic in results.ic_results:
             row = {
                 "factor": ic.factor_name,
+                "benchmark": bench,
                 "horizon": ic.horizon,
                 "mean_ic": ic.mean_ic,
                 "std_ic": ic.std_ic,
@@ -174,12 +184,15 @@ def export_csv(results: FactorStudyResults) -> Path:
 
         ic_df = pd.DataFrame(ic_rows)
         ic_path = _OUTPUT_DIR / f"ic_{name}_{date_str}.csv"
-        ic_df.to_csv(ic_path, index=False)
+        # 追加模式: 多基准结果合并到同一文件
+        if ic_path.exists():
+            ic_df.to_csv(ic_path, mode="a", header=False, index=False)
+        else:
+            ic_df.to_csv(ic_path, index=False)
         logger.info(f"IC 结果已导出: {ic_path}")
 
     # Event results
     if results.event_results:
-        # BH-FDR 校正
         p_values = [ev.p_value for ev in results.event_results]
         p_fdr_values = _apply_bh_fdr(p_values)
 
@@ -187,6 +200,7 @@ def export_csv(results: FactorStudyResults) -> Path:
         for ev, p_fdr in zip(results.event_results, p_fdr_values):
             ev_rows.append({
                 "factor": ev.factor_name,
+                "benchmark": bench,
                 "signal": ev.signal_label,
                 "horizon": ev.horizon,
                 "n_events": ev.n_events,
@@ -201,7 +215,10 @@ def export_csv(results: FactorStudyResults) -> Path:
 
         ev_df = pd.DataFrame(ev_rows)
         ev_path = _OUTPUT_DIR / f"events_{name}_{date_str}.csv"
-        ev_df.to_csv(ev_path, index=False)
+        if ev_path.exists():
+            ev_df.to_csv(ev_path, mode="a", header=False, index=False)
+        else:
+            ev_df.to_csv(ev_path, index=False)
         logger.info(f"事件研究结果已导出: {ev_path}")
 
     # OOS IC results
@@ -210,6 +227,7 @@ def export_csv(results: FactorStudyResults) -> Path:
         for ic in results.oos_ic_results:
             row = {
                 "factor": ic.factor_name,
+                "benchmark": bench,
                 "split": "OOS",
                 "horizon": ic.horizon,
                 "mean_ic": ic.mean_ic,
@@ -224,7 +242,10 @@ def export_csv(results: FactorStudyResults) -> Path:
 
         oos_ic_df = pd.DataFrame(oos_ic_rows)
         oos_ic_path = _OUTPUT_DIR / f"ic_oos_{name}_{date_str}.csv"
-        oos_ic_df.to_csv(oos_ic_path, index=False)
+        if oos_ic_path.exists():
+            oos_ic_df.to_csv(oos_ic_path, mode="a", header=False, index=False)
+        else:
+            oos_ic_df.to_csv(oos_ic_path, index=False)
         logger.info(f"OOS IC 结果已导出: {oos_ic_path}")
 
     # OOS Event results
@@ -236,6 +257,7 @@ def export_csv(results: FactorStudyResults) -> Path:
         for ev, p_fdr in zip(results.oos_event_results, p_fdr_values):
             oos_ev_rows.append({
                 "factor": ev.factor_name,
+                "benchmark": bench,
                 "split": "OOS",
                 "signal": ev.signal_label,
                 "horizon": ev.horizon,
@@ -251,7 +273,10 @@ def export_csv(results: FactorStudyResults) -> Path:
 
         oos_ev_df = pd.DataFrame(oos_ev_rows)
         oos_ev_path = _OUTPUT_DIR / f"events_oos_{name}_{date_str}.csv"
-        oos_ev_df.to_csv(oos_ev_path, index=False)
+        if oos_ev_path.exists():
+            oos_ev_df.to_csv(oos_ev_path, mode="a", header=False, index=False)
+        else:
+            oos_ev_df.to_csv(oos_ev_path, index=False)
         logger.info(f"OOS 事件研究结果已导出: {oos_ev_path}")
 
     return _OUTPUT_DIR
@@ -266,8 +291,15 @@ def generate_html_report(
 ) -> str:
     """生成 HTML 报告"""
     now = datetime.now().strftime("%Y-%m-%d %H:%M")
-    factor_names = [r.factor_name for r in all_results]
+    # 去重因子名
+    factor_names = list(dict.fromkeys(r.factor_name for r in all_results))
     title = ", ".join(factor_names)
+
+    # 基准列表
+    bench_labels = list(dict.fromkeys(
+        r.benchmark_label for r in all_results if r.benchmark_label
+    ))
+    bench_display = ", ".join(bench_labels) if bench_labels else "无"
 
     # IS 结果
     ic_table_html = _build_ic_table(all_results)
@@ -303,7 +335,7 @@ def generate_html_report(
 </head>
 <body>
 <h1>因子研究报告</h1>
-<p>生成时间: {now} | 因子: {title}</p>
+<p>生成时间: {now} | 因子: {title} | 基准: {bench_display}</p>
 
 {_build_config_section(all_results)}
 {split_info}
@@ -392,16 +424,22 @@ def _build_oos_section(all_results: List[FactorStudyResults]) -> str:
             "</div>"
         )
 
+    # 检查是否有多基准
+    has_multi_bench = len(set(r.benchmark_label for r in all_results)) > 1
+
     # 构建 OOS IC 表
     oos_ic_rows = ""
     has_oos_ic = False
     for res in all_results:
         if res.oos_ic_results:
             has_oos_ic = True
+            bench = _bench_display(res)
             for ic in res.oos_ic_results:
                 sig_class = ' class="sig"' if abs(ic.ic_ir) >= 0.5 else ""
+                bench_cell = f"<td style=\"text-align:left\">{bench}</td>" if has_multi_bench else ""
                 oos_ic_rows += f"""<tr>
                     <td style="text-align:left">{ic.factor_name}</td>
+                    {bench_cell}
                     <td>{ic.horizon}d</td>
                     <td{sig_class}>{ic.mean_ic:.4f}</td>
                     <td>{ic.std_ic:.4f}</td>
@@ -413,22 +451,26 @@ def _build_oos_section(all_results: List[FactorStudyResults]) -> str:
     if not has_oos_ic:
         return ""
 
+    bench_th = "<th>基准</th>" if has_multi_bench else ""
     oos_ic_table = f"""<table>
     <thead><tr>
-        <th>因子</th><th>Horizon</th><th>Mean IC</th>
+        <th>因子</th>{bench_th}<th>Horizon</th><th>Mean IC</th>
         <th>Std IC</th><th>IC_IR</th><th>Hit%</th><th>Q5-Q1</th>
     </tr></thead>
     <tbody>{oos_ic_rows}</tbody>
 </table>"""
 
     # 构建 OOS 事件表
-    oos_events = []
+    oos_events_with_bench = []
     for res in all_results:
         if res.oos_event_results:
-            oos_events.extend(res.oos_event_results)
+            for ev in res.oos_event_results:
+                oos_events_with_bench.append((ev, _bench_display(res)))
 
-    if oos_events:
-        oos_event_table = _build_event_table_from_list(oos_events)
+    if oos_events_with_bench:
+        oos_event_table = _build_event_table_from_list_with_bench(
+            oos_events_with_bench, has_multi_bench,
+        )
     else:
         oos_event_table = "<p>无 OOS 事件研究结果</p>"
 
@@ -444,7 +486,7 @@ def _build_oos_section(all_results: List[FactorStudyResults]) -> str:
 
 
 def _build_event_table_from_list(events) -> str:
-    """从事件列表构建 HTML 事件表 (带 FDR)"""
+    """从事件列表构建 HTML 事件表 (带 FDR) — 向后兼容"""
     if not events:
         return "<p>无事件研究结果</p>"
 
@@ -488,35 +530,100 @@ def _build_event_table_from_list(events) -> str:
 </table>"""
 
 
+def _build_event_table_from_list_with_bench(
+    events_with_bench: list,
+    has_multi_bench: bool,
+) -> str:
+    """从 (event, bench_label) 列表构建 HTML 事件表 (带基准列)"""
+    if not events_with_bench:
+        return "<p>无事件研究结果</p>"
+
+    events = [e for e, _ in events_with_bench]
+    benches = [b for _, b in events_with_bench]
+
+    p_values = [ev.p_value for ev in events]
+    p_fdr_values = _apply_bh_fdr(p_values)
+    indexed = list(zip(events, benches, p_fdr_values))
+
+    significant = [(ev, b, pf) for ev, b, pf in indexed
+                   if pf < 0.10 and ev.n_events >= 5]
+    significant.sort(key=lambda x: abs(x[0].t_stat), reverse=True)
+    display = significant[:30] if significant else sorted(
+        indexed, key=lambda x: abs(x[0].t_stat), reverse=True
+    )[:20]
+
+    bench_th = "<th>基准</th>" if has_multi_bench else ""
+    rows = ""
+    for ev, bench, p_fdr in display:
+        sig_class = ' class="sig"' if p_fdr < 0.05 else ""
+        star = "**" if p_fdr < 0.01 else ("*" if p_fdr < 0.05 else "")
+        bench_td = f'<td style="text-align:left">{bench}</td>' if has_multi_bench else ""
+        rows += f"""<tr>
+            <td style="text-align:left">{ev.factor_name}</td>
+            {bench_td}
+            <td style="text-align:left">{ev.signal_label}</td>
+            <td>{ev.horizon}d</td>
+            <td>{ev.n_events}</td>
+            <td>{ev.n_effective}</td>
+            <td{sig_class}>{ev.mean_return:.4f}</td>
+            <td>{ev.median_return:.4f}</td>
+            <td>{ev.hit_rate:.1%}</td>
+            <td{sig_class}>{ev.t_stat:.2f}{star}</td>
+            <td>{ev.p_value:.4f}</td>
+            <td{sig_class}>{p_fdr:.4f}</td>
+        </tr>"""
+
+    return f"""<p style="color:#888;font-size:12px;">BH-FDR corrected ({len(events)} hypotheses)</p>
+<table>
+    <thead><tr>
+        <th>因子</th>{bench_th}<th>信号</th><th>Horizon</th>
+        <th>N</th><th>N_eff</th><th>Mean Ret</th><th>Median</th>
+        <th>Hit%</th><th>t-stat</th><th>p-value</th><th>p-FDR</th>
+    </tr></thead>
+    <tbody>{rows}</tbody>
+</table>"""
+
+
 def _build_config_section(all_results: List[FactorStudyResults]) -> str:
     if not all_results:
         return ""
     r = all_results[0]
+    bench_list = r.config.benchmark_symbols
+    bench_str = ", ".join(bench_list) if bench_list else "无"
     return f"""<div class="config">
     <strong>配置:</strong>
     市场={r.config.market} | 频率={r.config.computation_freq} |
     Forward Horizons={r.config.forward_horizons} |
     Quantiles={r.config.n_quantiles} |
+    基准={bench_str} |
     计算日数={r.n_computation_dates} | 股票数={r.n_symbols}
 </div>"""
 
 
 def _build_ic_table(all_results: List[FactorStudyResults]) -> str:
-    # 检测是否使用了 benchmark
-    benchmark = None
-    for r in all_results:
-        if r.config.benchmark_symbol:
-            benchmark = r.config.benchmark_symbol
-            break
+    # 检查是否有多基准
+    bench_labels = list(dict.fromkeys(
+        r.benchmark_label for r in all_results if r.benchmark_label
+    ))
+    has_multi_bench = len(bench_labels) > 1
 
-    ret_label = f"Excess Return (vs {benchmark})" if benchmark else "Forward Return"
+    if has_multi_bench:
+        ret_label = "Excess Return (多基准对比)"
+    elif bench_labels:
+        ret_label = f"Excess Return (vs {bench_labels[0]})"
+    else:
+        ret_label = "Forward Return"
 
+    bench_th = "<th>基准</th>" if has_multi_bench else ""
     rows = ""
     for r in all_results:
+        bench = _bench_display(r)
         for ic in r.ic_results:
             sig_class = ' class="sig"' if abs(ic.ic_ir) >= 0.5 else ""
+            bench_td = f'<td style="text-align:left">{bench}</td>' if has_multi_bench else ""
             rows += f"""<tr>
                 <td style="text-align:left">{ic.factor_name}</td>
+                {bench_td}
                 <td>{ic.horizon}d</td>
                 <td{sig_class}>{ic.mean_ic:.4f}</td>
                 <td>{ic.std_ic:.4f}</td>
@@ -528,7 +635,7 @@ def _build_ic_table(all_results: List[FactorStudyResults]) -> str:
     return f"""<p style="color:#888;font-size:12px;">收益类型: {ret_label}</p>
 <table>
     <thead><tr>
-        <th>因子</th><th>Horizon</th><th>Mean IC</th>
+        <th>因子</th>{bench_th}<th>Horizon</th><th>Mean IC</th>
         <th>Std IC</th><th>IC_IR</th><th>Hit%</th><th>Q5-Q1</th>
     </tr></thead>
     <tbody>{rows}</tbody>
@@ -538,14 +645,20 @@ def _build_ic_table(all_results: List[FactorStudyResults]) -> str:
 def _build_decay_chart(all_results: List[FactorStudyResults]) -> str:
     datasets = []
     colors = ["#ffd700", "#4fc3f7", "#ff7043", "#66bb6a", "#ab47bc", "#26c6da"]
+    # 多基准时用不同虚实线区分
+    dash_patterns = ["[]", "[5,5]", "[10,5]", "[2,2]"]
 
     for i, r in enumerate(all_results):
         if r.ic_decay and r.ic_decay.horizons:
             color = colors[i % len(colors)]
+            bench = _bench_display(r)
+            label = f"{r.ic_decay.factor_name} (vs {bench})" if bench else r.ic_decay.factor_name
+            dash = dash_patterns[i % len(dash_patterns)]
             datasets.append(f"""{{
-                label: '{r.ic_decay.factor_name}',
+                label: '{label}',
                 data: {r.ic_decay.mean_ics},
                 borderColor: '{color}',
+                borderDash: {dash},
                 borderWidth: 2,
                 pointRadius: 4,
                 fill: false,
@@ -574,59 +687,80 @@ new Chart(document.getElementById('decayChart'), {{
 
 
 def _build_quantile_chart(all_results: List[FactorStudyResults]) -> str:
-    # 取第一个因子的最长 horizon 分位数
-    labels = []
-    data = []
+    # 多基准: 分组柱状图，每个 Q 多个柱子
+    bench_labels = list(dict.fromkeys(
+        r.benchmark_label for r in all_results if r.benchmark_label
+    ))
+    colors = ["#ffd700", "#4fc3f7", "#ff7043", "#66bb6a", "#ab47bc", "#26c6da"]
 
-    for r in all_results:
-        if r.ic_results:
-            longest = r.ic_results[-1]
-            if longest.quantile_returns:
-                for q in sorted(longest.quantile_returns.keys()):
-                    labels.append(f"Q{q}")
-                    data.append(round(longest.quantile_returns[q], 6))
-                break
+    datasets_js = []
+    q_labels = []
 
-    if not labels:
-        labels = ["Q1", "Q2", "Q3", "Q4", "Q5"]
-        data = [0, 0, 0, 0, 0]
+    for idx, r in enumerate(all_results):
+        if not r.ic_results:
+            continue
+        longest = r.ic_results[-1]
+        if not longest.quantile_returns:
+            continue
 
-    # 检测是否使用了 benchmark
-    chart_label = "Mean Forward Return"
-    for r in all_results:
-        if r.config.benchmark_symbol:
-            chart_label = f"Mean Excess Return (vs {r.config.benchmark_symbol})"
-            break
+        data = []
+        if not q_labels:
+            for q in sorted(longest.quantile_returns.keys()):
+                q_labels.append(f"Q{q}")
 
-    bg_colors = [
-        "'#f44336'" if d < 0 else "'#4caf50'" for d in data
-    ]
+        for q in sorted(longest.quantile_returns.keys()):
+            data.append(round(longest.quantile_returns[q], 6))
+
+        bench = _bench_display(r)
+        label = f"{r.factor_name} (vs {bench})" if bench else r.factor_name
+        color = colors[idx % len(colors)]
+
+        datasets_js.append(f"""{{
+            label: '{label}',
+            data: {data},
+            backgroundColor: '{color}',
+        }}""")
+
+    if not q_labels:
+        q_labels = ["Q1", "Q2", "Q3", "Q4", "Q5"]
+    if not datasets_js:
+        datasets_js = [f"""{{
+            label: 'N/A',
+            data: [0, 0, 0, 0, 0],
+            backgroundColor: '#666',
+        }}"""]
 
     return f"""
 new Chart(document.getElementById('quantileChart'), {{
     type: 'bar',
     data: {{
-        labels: {labels},
-        datasets: [{{
-            label: '{chart_label}',
-            data: {data},
-            backgroundColor: [{','.join(bg_colors)}],
-        }}]
+        labels: {q_labels},
+        datasets: [{','.join(datasets_js)}]
     }},
     options: {{
         responsive: true,
         plugins: {{ legend: {{ labels: {{ color: '#e0e0e0' }} }} }},
         scales: {{
             x: {{ ticks: {{ color: '#888' }}, grid: {{ color: '#333' }} }},
-            y: {{ title: {{ display: true, text: 'Mean Return', color: '#888' }}, ticks: {{ color: '#888' }}, grid: {{ color: '#333' }} }}
+            y: {{ title: {{ display: true, text: 'Mean Excess Return', color: '#888' }}, ticks: {{ color: '#888' }}, grid: {{ color: '#333' }} }}
         }}
     }}
 }});"""
 
 
 def _build_event_table(all_results: List[FactorStudyResults]) -> str:
-    """构建 IS 事件表"""
-    all_events = []
+    """构建 IS 事件表 (支持多基准)"""
+    has_multi_bench = len(set(r.benchmark_label for r in all_results)) > 1
+
+    events_with_bench = []
     for r in all_results:
-        all_events.extend(r.event_results)
-    return _build_event_table_from_list(all_events)
+        for ev in r.event_results:
+            events_with_bench.append((ev, _bench_display(r)))
+
+    if has_multi_bench:
+        return _build_event_table_from_list_with_bench(
+            events_with_bench, has_multi_bench,
+        )
+    else:
+        all_events = [e for e, _ in events_with_bench]
+        return _build_event_table_from_list(all_events)

@@ -8,12 +8,11 @@ FactorStudyRunner — 编排器
      sliced = adapter.slice_to_date(comp_date)
      FOR each factor:
        scores[factor][symbol].append((date, score))
-4. return_matrices = build_return_matrix(full_data, dates, horizons)
-5. Track 1: analyze_ic(scores, return_matrices)
-6. Track 2: FOR each sweep_entry:
-     events = detect_signals(scores, signal_def)
-     event_study(events, return_matrices)
-7. → FactorStudyResults
+4. FOR each benchmark:
+     return_matrices = build_return_matrix(...)
+     Track 1: analyze_ic(scores, return_matrices)
+     Track 2: event_study(events, return_matrices)
+5. → FactorStudyResults (N factors × M benchmarks)
 """
 
 import logging
@@ -40,9 +39,10 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class FactorStudyResults:
-    """单个因子的完整研究结果"""
+    """单个因子 × 单个基准的完整研究结果"""
     factor_name: str
     config: FactorStudyConfig
+    benchmark_label: str = ""
     # In-Sample 结果 (始终有)
     ic_results: List[ICResult] = field(default_factory=list)
     ic_decay: Optional[ICDecayCurve] = None
@@ -95,7 +95,7 @@ class FactorStudyRunner:
         运行因子研究
 
         Returns:
-            每个因子一个 FactorStudyResults
+            List[FactorStudyResults] — 长度 = 因子数 × 基准数
         """
         if not self._factors:
             logger.warning("没有注册任何因子")
@@ -117,40 +117,43 @@ class FactorStudyRunner:
         computation_dates = all_dates[::freq_days]
         logger.info(f"计算频率={self._config.computation_freq}, 计算日数={len(computation_dates)}")
 
-        # Step 4: 前向收益矩阵 (一次，跨因子共享)
-        # 有 benchmark 时自动减去基准收益 → 超额收益
-        benchmark_df = None
-        if self._config.benchmark_symbol:
-            benchmark_nav = self._adapter.get_benchmark_nav(
-                self._config.benchmark_symbol,
-            )
-            if benchmark_nav:
-                benchmark_df = pd.DataFrame(
-                    benchmark_nav, columns=["date", "close"],
-                )
-                logger.info(
-                    f"基准已加载: {self._config.benchmark_symbol}, "
-                    f"{len(benchmark_df)} 日"
-                )
-            else:
-                logger.warning(
-                    f"基准 {self._config.benchmark_symbol} 数据不可用，"
-                    f"使用原始收益"
-                )
+        # Step 3: 构建多组 return_matrices
+        benchmarks = self._config.benchmark_symbols
+        bench_return_matrices: Dict[str, Dict[int, pd.DataFrame]] = {}
 
-        if benchmark_df is not None:
-            logger.info("构建超额前向收益矩阵 (vs %s)...", self._config.benchmark_symbol)
-            return_matrices = build_excess_return_matrix(
-                full_data, benchmark_df, computation_dates,
-                self._config.forward_horizons,
-            )
+        if benchmarks:
+            for bench_label in benchmarks:
+                benchmark_nav = self._adapter.get_benchmark_nav(bench_label)
+                if benchmark_nav:
+                    benchmark_df = pd.DataFrame(
+                        benchmark_nav, columns=["date", "close"],
+                    )
+                    logger.info(
+                        f"基准已加载: {bench_label}, {len(benchmark_df)} 日"
+                    )
+                    logger.info("构建超额前向收益矩阵 (vs %s)...", bench_label)
+                    bench_return_matrices[bench_label] = build_excess_return_matrix(
+                        full_data, benchmark_df, computation_dates,
+                        self._config.forward_horizons,
+                    )
+                else:
+                    logger.warning(
+                        f"基准 {bench_label} 数据不可用，跳过"
+                    )
         else:
-            logger.info("构建前向收益矩阵...")
-            return_matrices = build_return_matrix(
+            # 无基准: 使用原始收益
+            logger.info("构建前向收益矩阵 (无基准)...")
+            bench_return_matrices[""] = build_return_matrix(
                 full_data, computation_dates, self._config.forward_horizons,
             )
 
-        # Step 3+5+6: 逐因子计算
+        if not bench_return_matrices:
+            logger.warning("所有基准数据均不可用，回退到原始收益")
+            bench_return_matrices[""] = build_return_matrix(
+                full_data, computation_dates, self._config.forward_horizons,
+            )
+
+        # Step 4: 逐因子计算分数 (一次)，然后对每个基准分析
         all_results: List[FactorStudyResults] = []
 
         for factor in self._factors:
@@ -158,29 +161,80 @@ class FactorStudyRunner:
             name = factor.meta.name
             logger.info(f"开始因子研究: {name}")
 
-            result = self._run_single_factor(
-                factor, full_data, computation_dates, return_matrices,
+            # 因子分数只算一次
+            score_dict, symbols_seen = self._compute_scores(
+                factor, full_data, computation_dates,
             )
-            result.elapsed_seconds = time.time() - t0
-            all_results.append(result)
 
-            logger.info(
-                f"完成 {name}: "
-                f"IC results={len(result.ic_results)}, "
-                f"Event results={len(result.event_results)}, "
-                f"耗时={result.elapsed_seconds:.1f}s"
-            )
+            # 对每个基准的 return_matrices 做分析
+            for bench_label, return_matrices in bench_return_matrices.items():
+                result = self._analyze_factor(
+                    factor, score_dict, symbols_seen,
+                    computation_dates, return_matrices,
+                    bench_label,
+                )
+                result.elapsed_seconds = time.time() - t0
+                all_results.append(result)
+
+                bench_display = bench_label or "raw"
+                logger.info(
+                    f"完成 {name} (vs {bench_display}): "
+                    f"IC results={len(result.ic_results)}, "
+                    f"Event results={len(result.event_results)}, "
+                    f"耗时={result.elapsed_seconds:.1f}s"
+                )
 
         return all_results
 
-    def _run_single_factor(
+    def _compute_scores(
         self,
         factor: Factor,
         full_data: Dict,
         computation_dates: List[str],
-        return_matrices: Dict,
+    ) -> Tuple[Dict[str, List[Tuple[str, float]]], set]:
+        """计算因子分数 (只算一次，跨基准共享)
+
+        Returns:
+            (score_dict, symbols_seen)
+        """
+        name = factor.meta.name
+        score_history: Dict[str, List[Tuple[str, float]]] = defaultdict(list)
+        symbols_seen = set()
+
+        for i, comp_date in enumerate(computation_dates):
+            sliced = self._adapter.slice_to_date(comp_date)
+            if not sliced:
+                continue
+
+            scores = factor.compute(sliced, comp_date)
+
+            for sym, score in scores.items():
+                score_history[sym].append((comp_date, score))
+                symbols_seen.add(sym)
+
+            if (i + 1) % 50 == 0:
+                logger.debug(
+                    f"  {name}: {i+1}/{len(computation_dates)} 日, "
+                    f"{len(scores)} symbols"
+                )
+
+        logger.info(
+            f"  因子分数计算完成: {len(score_history)} symbols × "
+            f"{len(computation_dates)} 日"
+        )
+
+        return dict(score_history), symbols_seen
+
+    def _analyze_factor(
+        self,
+        factor: Factor,
+        score_dict: Dict[str, List[Tuple[str, float]]],
+        symbols_seen: set,
+        computation_dates: List[str],
+        return_matrices: Dict[int, pd.DataFrame],
+        benchmark_label: str,
     ) -> FactorStudyResults:
-        """运行单个因子的完整研究 (含 IS/OOS 分割)"""
+        """对单个因子 × 单个基准做 IC + 事件研究 (含 IS/OOS 分割)"""
         name = factor.meta.name
 
         # IS/OOS 日期分割
@@ -207,43 +261,17 @@ class FactorStudyRunner:
         result = FactorStudyResults(
             factor_name=name,
             config=self._config,
+            benchmark_label=benchmark_label,
             n_computation_dates=len(computation_dates),
+            n_symbols=len(symbols_seen),
             is_dates=list(is_dates),
             oos_dates=list(oos_dates),
             oos_skipped=not has_oos,
         )
 
-        # Step 3: 逐日计算因子分数 (所有日期，IS+OOS)
-        score_history: Dict[str, List[Tuple[str, float]]] = defaultdict(list)
-        symbols_seen = set()
-
-        for i, comp_date in enumerate(computation_dates):
-            sliced = self._adapter.slice_to_date(comp_date)
-            if not sliced:
-                continue
-
-            scores = factor.compute(sliced, comp_date)
-
-            for sym, score in scores.items():
-                score_history[sym].append((comp_date, score))
-                symbols_seen.add(sym)
-
-            if (i + 1) % 50 == 0:
-                logger.debug(
-                    f"  {name}: {i+1}/{len(computation_dates)} 日, "
-                    f"{len(scores)} symbols"
-                )
-
-        result.n_symbols = len(symbols_seen)
-        logger.info(
-            f"  因子分数计算完成: {len(score_history)} symbols × "
-            f"{len(computation_dates)} 日"
-        )
-
-        if not score_history:
+        if not score_dict:
             return result
 
-        score_dict = dict(score_history)
         sweep = self._sweep_overrides.get(name) or get_default_sweep(name)
 
         # ── In-Sample ─────────────────────────────────────
@@ -254,8 +282,6 @@ class FactorStudyRunner:
 
         is_date_set = set(is_dates)
         for signal_def in sweep:
-            # 用完整历史做信号检测 (cross/sustained 需要前一个观测值)
-            # 然后只保留落在 IS 窗口内的事件
             events = detect_signals(score_dict, signal_def)
             events = _filter_events(events, is_date_set)
             if not events:
@@ -273,7 +299,6 @@ class FactorStudyRunner:
             oos_date_set = set(oos_dates)
             result.oos_event_results = []
             for signal_def in sweep:
-                # 用完整历史做信号检测，保留 OOS 窗口内的事件
                 events = detect_signals(score_dict, signal_def)
                 events = _filter_events(events, oos_date_set)
                 if not events:

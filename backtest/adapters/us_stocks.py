@@ -5,6 +5,7 @@
 import logging
 from typing import Callable, Dict, List, Optional, Tuple
 
+import numpy as np
 import pandas as pd
 
 logger = logging.getLogger(__name__)
@@ -71,15 +72,61 @@ class USStocksAdapter:
         """
         获取基准的 NAV 序列
 
+        Args:
+            symbol: 基准代码。"POOL_AVG" 为哨兵值，合成池内等权 NAV。
+
         Returns:
-            [(date_str, close_price), ...]
+            [(date_str, nav_float), ...]
         """
+        if symbol == "POOL_AVG":
+            return self._compute_pool_avg_nav()
+
         df = self._load_prices(symbol)
         if df is None or df.empty:
             logger.warning(f"基准 {symbol} 数据不可用")
             return []
 
         return list(zip(df["date"].astype(str), df["close"].astype(float)))
+
+    def _compute_pool_avg_nav(self) -> List[Tuple[str, float]]:
+        """
+        合成池内等权平均 NAV
+
+        用 _price_cache 中所有股票:
+        1. 每个交易日算各股票日收益率
+        2. 取横截面均值得到池平均日收益
+        3. 累乘得到 NAV 序列 (起始=100)
+        """
+        if not self._price_cache:
+            self.load_all()
+
+        if not self._price_cache:
+            logger.warning("POOL_AVG: 无股票数据")
+            return []
+
+        # 构建收盘价矩阵 (index=date, columns=symbol)
+        close_series = {}
+        for sym, df in self._price_cache.items():
+            s = df.set_index(df["date"].astype(str))["close"].astype(float)
+            s = s[~s.index.duplicated(keep="last")]
+            close_series[sym] = s
+
+        close_df = pd.DataFrame(close_series)
+        close_df = close_df.sort_index()
+
+        # 日收益率 → 横截面均值
+        daily_returns = close_df.pct_change()
+        pool_avg_return = daily_returns.mean(axis=1)  # 等权
+
+        # 累乘得 NAV (起始=100)
+        nav = (1 + pool_avg_return).cumprod() * 100
+        # 第一行是 NaN (pct_change)，设为 100
+        nav.iloc[0] = 100.0
+
+        result = [(d, float(v)) for d, v in nav.items() if not np.isnan(v)]
+        logger.info(f"POOL_AVG NAV 合成: {len(result)} 交易日, "
+                    f"{len(close_series)} 只股票")
+        return result
 
     def slice_to_date(
         self, date: str

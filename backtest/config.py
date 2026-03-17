@@ -113,7 +113,8 @@ class FactorStudyConfig:
     computation_freq: Literal["D", "W"] = "W"
     forward_horizons: List[int] = field(default_factory=list)
     n_quantiles: int = 5
-    benchmark_symbol: Optional[str] = None
+    benchmark_symbol: Optional[str] = None       # 向后兼容，迁移到 benchmark_symbols
+    benchmark_symbols: List[str] = field(default_factory=list)
     start_date: Optional[str] = None
     end_date: Optional[str] = None
     oos_fraction: float = 0.3       # 最后 30% 的日期作为 OOS
@@ -126,18 +127,25 @@ class FactorStudyConfig:
             else:
                 self.forward_horizons = list(_CRYPTO_HORIZONS)
 
+        # 向后兼容: benchmark_symbol → benchmark_symbols
+        if self.benchmark_symbol and not self.benchmark_symbols:
+            self.benchmark_symbols = [self.benchmark_symbol]
+        # 保持 benchmark_symbol 同步 (取第一个)
+        if self.benchmark_symbols and not self.benchmark_symbol:
+            self.benchmark_symbol = self.benchmark_symbols[0]
+
     def label(self) -> str:
         return f"{self.market}_{self.computation_freq}"
 
 
 def us_factor_study(**overrides) -> FactorStudyConfig:
-    """美股因子研究预设: 周频, [5,10,20,40,60]d, SPY 基准"""
+    """美股因子研究预设: 周频, [5,10,20,40,60]d, QQQ+POOL_AVG 基准"""
     defaults = dict(
         market="us_stocks",
         computation_freq="W",
         forward_horizons=list(_US_HORIZONS),
         n_quantiles=5,
-        benchmark_symbol="SPY",
+        benchmark_symbols=["QQQ", "POOL_AVG"],
     )
     defaults.update(overrides)
     return FactorStudyConfig(**defaults)
@@ -150,7 +158,7 @@ def crypto_factor_study(**overrides) -> FactorStudyConfig:
         computation_freq="D",
         forward_horizons=list(_CRYPTO_HORIZONS),
         n_quantiles=5,
-        benchmark_symbol="BTCUSDT",
+        benchmark_symbols=["BTCUSDT"],
     )
     defaults.update(overrides)
     return FactorStudyConfig(**defaults)
