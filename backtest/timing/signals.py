@@ -360,6 +360,93 @@ def vix_rsi_signals(
     return signals
 
 
+def vix_spike_hold_signals(
+    price_df: pd.DataFrame,
+    buy_threshold: float = 30,
+    hold_days: int = 20,
+    aux_data: pd.DataFrame = None,
+) -> List[Tuple[str, str]]:
+    """
+    VIX 恐慌买入 + 固定持有期
+
+    VIX > buy_threshold → BUY, 持有 hold_days 个交易日后 → SELL
+    """
+    if aux_data is None or len(aux_data) == 0:
+        return []
+
+    target_dates = set(price_df["date"].astype(str))
+
+    vix = aux_data.copy()
+    vix["date"] = vix["date"].astype(str)
+
+    close = vix["close"].astype(float)
+    dates = vix["date"]
+
+    signals = []
+    in_market = False
+    days_held = 0
+
+    for i in range(len(close)):
+        if in_market:
+            days_held += 1
+            if days_held >= hold_days:
+                in_market = False
+                if dates.iloc[i] in target_dates:
+                    signals.append((dates.iloc[i], "SELL"))
+        else:
+            if close.iloc[i] > buy_threshold:
+                in_market = True
+                days_held = 0
+                if dates.iloc[i] in target_dates:
+                    signals.append((dates.iloc[i], "BUY"))
+
+    return signals
+
+
+def vix_spike_revert_signals(
+    price_df: pd.DataFrame,
+    buy_threshold: float = 30,
+    exit_drop_pct: float = 30,
+    aux_data: pd.DataFrame = None,
+) -> List[Tuple[str, str]]:
+    """
+    VIX 恐慌买入 + VIX 回落退出
+
+    VIX > buy_threshold → BUY
+    VIX 从入场时下降 exit_drop_pct% → SELL
+    """
+    if aux_data is None or len(aux_data) == 0:
+        return []
+
+    target_dates = set(price_df["date"].astype(str))
+
+    vix = aux_data.copy()
+    vix["date"] = vix["date"].astype(str)
+
+    close = vix["close"].astype(float)
+    dates = vix["date"]
+
+    signals = []
+    in_market = False
+    entry_vix = 0.0
+
+    for i in range(len(close)):
+        if in_market:
+            exit_level = entry_vix * (1.0 - exit_drop_pct / 100.0)
+            if close.iloc[i] < exit_level:
+                in_market = False
+                if dates.iloc[i] in target_dates:
+                    signals.append((dates.iloc[i], "SELL"))
+        else:
+            if close.iloc[i] > buy_threshold:
+                in_market = True
+                entry_vix = close.iloc[i]
+                if dates.iloc[i] in target_dates:
+                    signals.append((dates.iloc[i], "BUY"))
+
+    return signals
+
+
 # 信号注册表: 名称 -> (函数, 默认参数)
 SIGNAL_REGISTRY: Dict[str, Tuple[Callable, dict]] = {
     "MACD": (macd_signals, {"fast": 12, "slow": 26, "signal": 9}),
@@ -370,4 +457,6 @@ SIGNAL_REGISTRY: Dict[str, Tuple[Callable, dict]] = {
     "VIX_Spike": (vix_spike_signals, {"buy_threshold": 30, "sell_threshold": 20}),
     "VIX_Percentile": (vix_percentile_signals, {"lookback": 252, "buy_pctile": 90, "sell_pctile": 20}),
     "VIX_RSI": (vix_rsi_signals, {"period": 14, "overbought": 70, "oversold": 30}),
+    "VIX_Spike_Hold": (vix_spike_hold_signals, {"buy_threshold": 30, "hold_days": 20}),
+    "VIX_Spike_Revert": (vix_spike_revert_signals, {"buy_threshold": 30, "exit_drop_pct": 30}),
 }

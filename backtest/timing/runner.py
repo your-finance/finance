@@ -15,7 +15,8 @@ from backtest.timing.signals import SIGNAL_REGISTRY
 logger = logging.getLogger(__name__)
 
 # VIX 信号需要 aux_data (^VIX 价格序列)
-_VIX_SIGNALS = {"VIX_MA", "VIX_Spike", "VIX_Percentile", "VIX_RSI"}
+_VIX_SIGNALS = {"VIX_MA", "VIX_Spike", "VIX_Percentile", "VIX_RSI",
+                "VIX_Spike_Hold", "VIX_Spike_Revert"}
 
 
 @dataclass

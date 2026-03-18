@@ -15,6 +15,8 @@ from backtest.timing.signals import (
     vix_spike_signals,
     vix_percentile_signals,
     vix_rsi_signals,
+    vix_spike_hold_signals,
+    vix_spike_revert_signals,
     SIGNAL_REGISTRY,
 )
 from backtest.timing.engine import TimingResult, run_timing_backtest
@@ -456,6 +458,97 @@ class TestVIXRSISignals:
         )
 
 
+class TestVIXSpikeHoldSignals:
+    def test_hold_then_sell(self):
+        """VIX > 30 买入，hold_days 后卖出"""
+        vix_vals = [18] * 5 + [35] + [25] * 20 + [18] * 5
+        vix_df = _make_vix_df(vix_vals)
+        price_df = _make_price_df([100] * len(vix_vals))
+
+        signals = vix_spike_hold_signals(
+            price_df, buy_threshold=30, hold_days=10, aux_data=vix_df,
+        )
+
+        buy_signals = [s for s in signals if s[1] == "BUY"]
+        sell_signals = [s for s in signals if s[1] == "SELL"]
+        assert len(buy_signals) == 1
+        assert len(sell_signals) == 1
+
+    def test_hold_days_respected(self):
+        """卖出应在买入后恰好 hold_days 天"""
+        vix_vals = [18] * 3 + [35] + [25] * 30
+        vix_df = _make_vix_df(vix_vals)
+        price_df = _make_price_df([100] * len(vix_vals))
+
+        signals = vix_spike_hold_signals(
+            price_df, buy_threshold=30, hold_days=5, aux_data=vix_df,
+        )
+
+        assert len(signals) == 2
+        buy_date = signals[0][0]
+        sell_date = signals[1][0]
+        buy_idx = vix_df["date"].tolist().index(buy_date)
+        sell_idx = vix_df["date"].tolist().index(sell_date)
+        assert sell_idx - buy_idx == 5
+
+    def test_no_rebuy_during_hold(self):
+        """持有期内即使 VIX 再次 > threshold 也不重复买"""
+        vix_vals = [18] * 3 + [35, 25, 25, 36, 25, 25, 25] + [18] * 5
+        vix_df = _make_vix_df(vix_vals)
+        price_df = _make_price_df([100] * len(vix_vals))
+
+        signals = vix_spike_hold_signals(
+            price_df, buy_threshold=30, hold_days=5, aux_data=vix_df,
+        )
+
+        buy_signals = [s for s in signals if s[1] == "BUY"]
+        assert len(buy_signals) == 1
+
+    def test_none_aux_data(self):
+        price_df = _make_price_df([100] * 50)
+        assert vix_spike_hold_signals(price_df, aux_data=None) == []
+
+
+class TestVIXSpikeRevertSignals:
+    def test_revert_sell(self):
+        """VIX 从入场值下降 exit_drop_pct% → SELL"""
+        # VIX 35 入场, 35 * 0.7 = 24.5, VIX 降到 24 时卖出
+        vix_vals = [18] * 5 + [35, 33, 30, 28, 26, 24, 22] + [18] * 5
+        vix_df = _make_vix_df(vix_vals)
+        price_df = _make_price_df([100] * len(vix_vals))
+
+        signals = vix_spike_revert_signals(
+            price_df, buy_threshold=30, exit_drop_pct=30, aux_data=vix_df,
+        )
+
+        buy_signals = [s for s in signals if s[1] == "BUY"]
+        sell_signals = [s for s in signals if s[1] == "SELL"]
+        assert len(buy_signals) == 1
+        assert len(sell_signals) == 1
+
+    def test_higher_vix_means_later_exit(self):
+        """入场 VIX 越高，exit level 越高，退出越快"""
+        # VIX 40 入场, 40 * 0.7 = 28, VIX 降到 27 时就卖
+        vix_vals = [18] * 5 + [40, 35, 30, 27, 25] + [18] * 5
+        vix_df = _make_vix_df(vix_vals)
+        price_df = _make_price_df([100] * len(vix_vals))
+
+        signals = vix_spike_revert_signals(
+            price_df, buy_threshold=30, exit_drop_pct=30, aux_data=vix_df,
+        )
+
+        sell_signals = [s for s in signals if s[1] == "SELL"]
+        assert len(sell_signals) == 1
+        # 应在 VIX=27 那天卖出（第一个 < 28 的日子）
+        sell_date = sell_signals[0][0]
+        sell_idx = vix_df["date"].tolist().index(sell_date)
+        assert vix_df["close"].iloc[sell_idx] < 28
+
+    def test_none_aux_data(self):
+        price_df = _make_price_df([100] * 50)
+        assert vix_spike_revert_signals(price_df, aux_data=None) == []
+
+
 class TestSignalRegistry:
     def test_all_signals_registered(self):
         """所有信号都在注册表中"""
@@ -467,6 +560,8 @@ class TestSignalRegistry:
         assert "VIX_Spike" in SIGNAL_REGISTRY
         assert "VIX_Percentile" in SIGNAL_REGISTRY
         assert "VIX_RSI" in SIGNAL_REGISTRY
+        assert "VIX_Spike_Hold" in SIGNAL_REGISTRY
+        assert "VIX_Spike_Revert" in SIGNAL_REGISTRY
 
     def test_registry_callables(self):
         """注册表中的函数可调用"""

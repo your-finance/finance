@@ -14,6 +14,8 @@ from backtest.timing.signals import (
     vix_spike_signals,
     vix_percentile_signals,
     vix_rsi_signals,
+    vix_spike_hold_signals,
+    vix_spike_revert_signals,
     SIGNAL_REGISTRY,
 )
 from backtest.timing.engine import TimingResult, run_timing_backtest
@@ -32,6 +34,8 @@ __all__ = [
     "vix_spike_signals",
     "vix_percentile_signals",
     "vix_rsi_signals",
+    "vix_spike_hold_signals",
+    "vix_spike_revert_signals",
     "SIGNAL_REGISTRY",
     "TimingResult",
     "run_timing_backtest",
