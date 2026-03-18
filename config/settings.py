@@ -136,6 +136,9 @@ DOLLAR_VOLUME_LOOKBACK = 30     # 新面孔回看天数
 # Benchmark symbols (always included in price updates)
 BENCHMARK_SYMBOLS = ["SPY", "QQQ"]
 
+# Auxiliary symbols (non-equity data needed by subsystems)
+AUX_SYMBOLS = ["^VIX"]
+
 # ============ 主题关键词（手动维护，~25 主题 120+ 关键词） ============
 THEME_KEYWORDS_SEED = {
     # ===== AI 核心 =====

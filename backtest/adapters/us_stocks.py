@@ -206,7 +206,7 @@ class USStocksAdapter:
             from src.data.market_store import get_store
             store = get_store()
             symbols = store.get_symbols("daily_price")
-            symbols = [s for s in symbols if s not in ("SPY", "QQQ")]
+            symbols = [s for s in symbols if s not in ("SPY", "QQQ", "^VIX")]
             return symbols
         except Exception as e:
             logger.warning(f"market.db 发现股票失败: {e}")

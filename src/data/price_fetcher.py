@@ -106,10 +106,10 @@ def update_all_prices(symbols: List[str] = None, force_full: bool = False) -> di
     if symbols is None:
         symbols = get_symbols()
 
-    # Always include benchmark symbols
-    from config.settings import BENCHMARK_SYMBOLS
-    symbols = list(set(symbols + BENCHMARK_SYMBOLS))
-    logger.info(f"Including {len(BENCHMARK_SYMBOLS)} benchmark symbols: {BENCHMARK_SYMBOLS}")
+    # Always include benchmark + auxiliary symbols
+    from config.settings import BENCHMARK_SYMBOLS, AUX_SYMBOLS
+    symbols = list(set(symbols + BENCHMARK_SYMBOLS + AUX_SYMBOLS))
+    logger.info(f"Including {len(BENCHMARK_SYMBOLS)} benchmark + {len(AUX_SYMBOLS)} aux symbols")
 
     if not symbols:
         logger.warning("股票池为空")

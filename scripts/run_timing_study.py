@@ -39,7 +39,7 @@ def main():
     parser = argparse.ArgumentParser(description="择时信号回测研究")
     parser.add_argument(
         "--signal", type=str, required=True,
-        help="Signal name (MACD, RSI, MA_Cross, or 'all')",
+        help="Signal name (MACD, RSI, MA_Cross, New_High, VIX_MA, VIX_Spike, VIX_Percentile, VIX_RSI, or 'all')",
     )
     parser.add_argument("--start", type=str, help="Start date (YYYY-MM-DD)")
     parser.add_argument("--end", type=str, help="End date (YYYY-MM-DD)")

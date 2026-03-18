@@ -9,6 +9,11 @@ from backtest.timing.signals import (
     macd_signals,
     rsi_signals,
     ma_cross_signals,
+    new_high_signals,
+    vix_ma_signals,
+    vix_spike_signals,
+    vix_percentile_signals,
+    vix_rsi_signals,
     SIGNAL_REGISTRY,
 )
 from backtest.timing.engine import TimingResult, run_timing_backtest
@@ -22,6 +27,11 @@ __all__ = [
     "macd_signals",
     "rsi_signals",
     "ma_cross_signals",
+    "new_high_signals",
+    "vix_ma_signals",
+    "vix_spike_signals",
+    "vix_percentile_signals",
+    "vix_rsi_signals",
     "SIGNAL_REGISTRY",
     "TimingResult",
     "run_timing_backtest",

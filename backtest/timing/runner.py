@@ -14,6 +14,9 @@ from backtest.timing.signals import SIGNAL_REGISTRY
 
 logger = logging.getLogger(__name__)
 
+# VIX 信号需要 aux_data (^VIX 价格序列)
+_VIX_SIGNALS = {"VIX_MA", "VIX_Spike", "VIX_Percentile", "VIX_RSI"}
+
 
 @dataclass
 class TimingStudyConfig:
@@ -71,6 +74,14 @@ def run_timing_study(config: TimingStudyConfig, adapter) -> AggregateResult:
     signal_fn, default_params = SIGNAL_REGISTRY[config.signal_name]
     params = {**default_params, **config.signal_params}
 
+    # 加载 VIX aux_data (仅对 VIX 信号)
+    aux_data = None
+    if config.signal_name in _VIX_SIGNALS:
+        aux_data = adapter._load_prices("^VIX")
+        if aux_data is None or len(aux_data) < 70:
+            logger.error("^VIX data unavailable or too short for %s", config.signal_name)
+            return _aggregate(config, params, [], [])
+
     # 加载数据
     price_cache = adapter.load_all()
 
@@ -85,12 +96,17 @@ def run_timing_study(config: TimingStudyConfig, adapter) -> AggregateResult:
         config.signal_name, params, len(symbols), config.include_indices,
     )
 
+    # 构建运行参数 (VIX 信号注入 aux_data)
+    run_params = dict(params)
+    if aux_data is not None:
+        run_params["aux_data"] = aux_data
+
     # 跑全池
     per_stock_results = []
     for sym in symbols:
         result = _run_single(
             sym, config.signal_name, price_cache[sym],
-            signal_fn, params, config.start_date, config.end_date,
+            signal_fn, run_params, config.start_date, config.end_date,
         )
         if result is not None and result.n_trades >= config.min_trades:
             per_stock_results.append(result)
@@ -107,12 +123,12 @@ def run_timing_study(config: TimingStudyConfig, adapter) -> AggregateResult:
         if idx_df is not None and len(idx_df) >= 70:
             result = _run_single(
                 idx_sym, config.signal_name, idx_df,
-                signal_fn, params, config.start_date, config.end_date,
+                signal_fn, run_params, config.start_date, config.end_date,
             )
             if result is not None:
                 index_results.append(result)
 
-    # 聚合统计
+    # 聚合统计 (用原始 params，不含 DataFrame)
     return _aggregate(config, params, per_stock_results, index_results)
 
 

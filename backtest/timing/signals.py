@@ -158,10 +158,198 @@ def new_high_signals(
     return signals
 
 
+# ── VIX 跨资产择时信号 ──────────────────────────────────
+
+
+def vix_ma_signals(
+    price_df: pd.DataFrame,
+    vix_ma_period: int = 20,
+    aux_data: pd.DataFrame = None,
+) -> List[Tuple[str, str]]:
+    """
+    VIX 均线择时信号
+
+    VIX 下穿 SMA(vix_ma_period) → BUY（恐慌消退）
+    VIX 上穿 SMA(vix_ma_period) → SELL（恐慌升温）
+    """
+    if aux_data is None or len(aux_data) == 0:
+        return []
+
+    target_dates = set(price_df["date"].astype(str))
+    vix = aux_data.copy()
+    vix["date"] = vix["date"].astype(str)
+    vix = vix[vix["date"].isin(target_dates)].reset_index(drop=True)
+
+    if len(vix) < vix_ma_period + 1:
+        return []
+
+    close = vix["close"].astype(float)
+    dates = vix["date"]
+    ma = close.rolling(window=vix_ma_period, min_periods=vix_ma_period).mean()
+
+    warmup = vix_ma_period
+    signals = []
+
+    for i in range(warmup, len(close)):
+        prev_diff = close.iloc[i - 1] - ma.iloc[i - 1]
+        curr_diff = close.iloc[i] - ma.iloc[i]
+
+        if np.isnan(prev_diff) or np.isnan(curr_diff):
+            continue
+
+        if prev_diff >= 0 and curr_diff < 0:
+            signals.append((dates.iloc[i], "BUY"))
+        elif prev_diff <= 0 and curr_diff > 0:
+            signals.append((dates.iloc[i], "SELL"))
+
+    return signals
+
+
+def vix_spike_signals(
+    price_df: pd.DataFrame,
+    buy_threshold: float = 30,
+    sell_threshold: float = 20,
+    aux_data: pd.DataFrame = None,
+) -> List[Tuple[str, str]]:
+    """
+    VIX 恐慌反转信号
+
+    VIX > buy_threshold → BUY（买恐慌）
+    VIX < sell_threshold → SELL（恐慌消退 = 贪婪，减仓）
+    """
+    if aux_data is None or len(aux_data) == 0:
+        return []
+
+    target_dates = set(price_df["date"].astype(str))
+    vix = aux_data.copy()
+    vix["date"] = vix["date"].astype(str)
+    vix = vix[vix["date"].isin(target_dates)].reset_index(drop=True)
+
+    if len(vix) < 2:
+        return []
+
+    close = vix["close"].astype(float)
+    dates = vix["date"]
+
+    signals = []
+    in_market = False
+
+    for i in range(1, len(close)):
+        if not in_market and close.iloc[i] > buy_threshold:
+            signals.append((dates.iloc[i], "BUY"))
+            in_market = True
+        elif in_market and close.iloc[i] < sell_threshold:
+            signals.append((dates.iloc[i], "SELL"))
+            in_market = False
+
+    return signals
+
+
+def vix_percentile_signals(
+    price_df: pd.DataFrame,
+    lookback: int = 252,
+    buy_pctile: float = 90,
+    sell_pctile: float = 20,
+    aux_data: pd.DataFrame = None,
+) -> List[Tuple[str, str]]:
+    """
+    VIX 百分位择时信号
+
+    VIX 252日百分位 > 90% → BUY（极端恐慌 = 买入机会）
+    VIX 252日百分位 < 20% → SELL（极端自满 = 减仓）
+    """
+    if aux_data is None or len(aux_data) == 0:
+        return []
+
+    target_dates = set(price_df["date"].astype(str))
+    vix = aux_data.copy()
+    vix["date"] = vix["date"].astype(str)
+    vix = vix[vix["date"].isin(target_dates)].reset_index(drop=True)
+
+    if len(vix) < lookback + 1:
+        return []
+
+    close = vix["close"].astype(float)
+    dates = vix["date"]
+
+    signals = []
+    in_market = False
+
+    for i in range(lookback, len(close)):
+        window = close.iloc[i - lookback:i]
+        pctile = (window < close.iloc[i]).sum() / len(window) * 100
+
+        if not in_market and pctile > buy_pctile:
+            signals.append((dates.iloc[i], "BUY"))
+            in_market = True
+        elif in_market and pctile < sell_pctile:
+            signals.append((dates.iloc[i], "SELL"))
+            in_market = False
+
+    return signals
+
+
+def vix_rsi_signals(
+    price_df: pd.DataFrame,
+    period: int = 14,
+    overbought: float = 70,
+    oversold: float = 30,
+    aux_data: pd.DataFrame = None,
+) -> List[Tuple[str, str]]:
+    """
+    VIX RSI 择时信号
+
+    VIX RSI > overbought（VIX 过热 = 市场超卖）→ BUY
+    VIX RSI < oversold（VIX 冷却 = 市场过热）→ SELL
+    """
+    if aux_data is None or len(aux_data) == 0:
+        return []
+
+    target_dates = set(price_df["date"].astype(str))
+    vix = aux_data.copy()
+    vix["date"] = vix["date"].astype(str)
+    vix = vix[vix["date"].isin(target_dates)].reset_index(drop=True)
+
+    if len(vix) < period + 2:
+        return []
+
+    close = vix["close"].astype(float)
+    dates = vix["date"]
+
+    delta = close.diff()
+    gain = delta.clip(lower=0)
+    loss = (-delta).clip(lower=0)
+
+    avg_gain = gain.ewm(alpha=1.0 / period, min_periods=period, adjust=False).mean()
+    avg_loss = loss.ewm(alpha=1.0 / period, min_periods=period, adjust=False).mean()
+
+    rs = avg_gain / avg_loss.replace(0, np.nan)
+    rsi = 100 - (100 / (1 + rs))
+    rsi = rsi.fillna(50)
+
+    warmup = period + 1
+    signals = []
+
+    for i in range(warmup, len(close)):
+        prev_rsi = rsi.iloc[i - 1]
+        curr_rsi = rsi.iloc[i]
+
+        if prev_rsi <= overbought and curr_rsi > overbought:
+            signals.append((dates.iloc[i], "BUY"))
+        elif prev_rsi >= oversold and curr_rsi < oversold:
+            signals.append((dates.iloc[i], "SELL"))
+
+    return signals
+
+
 # 信号注册表: 名称 -> (函数, 默认参数)
 SIGNAL_REGISTRY: Dict[str, Tuple[Callable, dict]] = {
     "MACD": (macd_signals, {"fast": 12, "slow": 26, "signal": 9}),
     "RSI": (rsi_signals, {"period": 14, "oversold": 30, "overbought": 70}),
     "MA_Cross": (ma_cross_signals, {"short_window": 20, "long_window": 60}),
     "New_High": (new_high_signals, {"entry_days": 50, "exit_days": 20}),
+    "VIX_MA": (vix_ma_signals, {"vix_ma_period": 20}),
+    "VIX_Spike": (vix_spike_signals, {"buy_threshold": 30, "sell_threshold": 20}),
+    "VIX_Percentile": (vix_percentile_signals, {"lookback": 252, "buy_pctile": 90, "sell_pctile": 20}),
+    "VIX_RSI": (vix_rsi_signals, {"period": 14, "overbought": 70, "oversold": 30}),
 }

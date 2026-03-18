@@ -11,6 +11,10 @@ from backtest.timing.signals import (
     macd_signals,
     rsi_signals,
     ma_cross_signals,
+    vix_ma_signals,
+    vix_spike_signals,
+    vix_percentile_signals,
+    vix_rsi_signals,
     SIGNAL_REGISTRY,
 )
 from backtest.timing.engine import TimingResult, run_timing_backtest
@@ -204,12 +208,195 @@ class TestMACrossSignals:
             assert date not in warmup_dates
 
 
+def _make_vix_df(values, start_date="2024-01-01"):
+    """从 VIX 值列表构建 aux_data DataFrame"""
+    dates = pd.date_range(start=start_date, periods=len(values), freq="B")
+    return pd.DataFrame({
+        "date": dates.strftime("%Y-%m-%d"),
+        "close": values,
+    })
+
+
+class TestVIXMASignals:
+    def test_basic_buy_signal(self):
+        """VIX 从高位下穿 MA → BUY"""
+        # VIX 高位 30 天，然后快速下降
+        vix_vals = [25] * 30 + [24, 23, 22, 20, 18, 16, 14, 13, 12, 11]
+        vix_df = _make_vix_df(vix_vals)
+        price_df = _make_price_df([100] * len(vix_vals))
+
+        signals = vix_ma_signals(price_df, vix_ma_period=20, aux_data=vix_df)
+
+        buy_signals = [s for s in signals if s[1] == "BUY"]
+        assert len(buy_signals) > 0, "Should detect VIX crossing below MA"
+
+    def test_basic_sell_signal(self):
+        """VIX 从低位上穿 MA → SELL"""
+        # VIX 低位 30 天，然后快速上升
+        vix_vals = [15] * 30 + [16, 18, 20, 22, 25, 28, 30, 32, 35, 38]
+        vix_df = _make_vix_df(vix_vals)
+        price_df = _make_price_df([100] * len(vix_vals))
+
+        signals = vix_ma_signals(price_df, vix_ma_period=20, aux_data=vix_df)
+
+        sell_signals = [s for s in signals if s[1] == "SELL"]
+        assert len(sell_signals) > 0, "Should detect VIX crossing above MA"
+
+    def test_none_aux_data(self):
+        """aux_data=None → 空列表"""
+        price_df = _make_price_df([100] * 50)
+        signals = vix_ma_signals(price_df, aux_data=None)
+        assert signals == []
+
+    def test_warmup(self):
+        """信号不应在预热期内出现"""
+        vix_vals = _make_oscillating(n=100, center=20, amplitude=10, period=30)
+        vix_df = _make_vix_df(vix_vals)
+        price_df = _make_price_df([100] * len(vix_vals))
+
+        signals = vix_ma_signals(price_df, vix_ma_period=20, aux_data=vix_df)
+
+        warmup_dates = set(vix_df["date"].iloc[:20].tolist())
+        for date, _ in signals:
+            assert date not in warmup_dates
+
+    def test_date_alignment(self):
+        """信号日期应在目标资产的日期集合内"""
+        vix_vals = _make_oscillating(n=100, center=20, amplitude=10, period=30)
+        vix_df = _make_vix_df(vix_vals)
+        price_df = _make_price_df([100] * len(vix_vals))
+        target_dates = set(price_df["date"].astype(str))
+
+        signals = vix_ma_signals(price_df, vix_ma_period=20, aux_data=vix_df)
+
+        for date, _ in signals:
+            assert date in target_dates
+
+
+class TestVIXSpikeSignals:
+    def test_spike_buy(self):
+        """VIX > 30 → BUY"""
+        vix_vals = [18] * 10 + [35] * 5 + [18] * 5
+        vix_df = _make_vix_df(vix_vals)
+        price_df = _make_price_df([100] * len(vix_vals))
+
+        signals = vix_spike_signals(price_df, buy_threshold=30, sell_threshold=20, aux_data=vix_df)
+
+        buy_signals = [s for s in signals if s[1] == "BUY"]
+        assert len(buy_signals) > 0
+
+    def test_spike_sell(self):
+        """VIX drops below 20 after spike → SELL"""
+        vix_vals = [18] * 5 + [35] * 5 + [15] * 10
+        vix_df = _make_vix_df(vix_vals)
+        price_df = _make_price_df([100] * len(vix_vals))
+
+        signals = vix_spike_signals(price_df, buy_threshold=30, sell_threshold=20, aux_data=vix_df)
+
+        sell_signals = [s for s in signals if s[1] == "SELL"]
+        assert len(sell_signals) > 0
+
+    def test_none_aux_data(self):
+        """aux_data=None → 空列表"""
+        price_df = _make_price_df([100] * 50)
+        signals = vix_spike_signals(price_df, aux_data=None)
+        assert signals == []
+
+    def test_no_consecutive_buys(self):
+        """不应连续发出 BUY（有状态跟踪）"""
+        vix_vals = [18] * 5 + [35, 36, 37, 38, 35] + [18] * 5
+        vix_df = _make_vix_df(vix_vals)
+        price_df = _make_price_df([100] * len(vix_vals))
+
+        signals = vix_spike_signals(price_df, buy_threshold=30, sell_threshold=20, aux_data=vix_df)
+
+        buy_signals = [s for s in signals if s[1] == "BUY"]
+        assert len(buy_signals) == 1, "Should only trigger one BUY per spike"
+
+
+class TestVIXPercentileSignals:
+    def test_extreme_high_buy(self):
+        """VIX 百分位 > 90% → BUY"""
+        # 252 天低 VIX + 突然飙升
+        vix_vals = [15] * 252 + [40, 42, 45]
+        vix_df = _make_vix_df(vix_vals)
+        price_df = _make_price_df([100] * len(vix_vals))
+
+        signals = vix_percentile_signals(
+            price_df, lookback=252, buy_pctile=90, sell_pctile=20, aux_data=vix_df,
+        )
+
+        buy_signals = [s for s in signals if s[1] == "BUY"]
+        assert len(buy_signals) > 0
+
+    def test_none_aux_data(self):
+        """aux_data=None → 空列表"""
+        price_df = _make_price_df([100] * 50)
+        signals = vix_percentile_signals(price_df, aux_data=None)
+        assert signals == []
+
+    def test_too_short_data(self):
+        """数据不足 lookback → 空列表"""
+        vix_vals = [20] * 100
+        vix_df = _make_vix_df(vix_vals)
+        price_df = _make_price_df([100] * 100)
+
+        signals = vix_percentile_signals(
+            price_df, lookback=252, aux_data=vix_df,
+        )
+        assert signals == []
+
+
+class TestVIXRSISignals:
+    def test_vix_overbought_buy(self):
+        """VIX RSI > 70（VIX 过热 = 市场超卖）→ BUY"""
+        # VIX 急涨 → RSI > 70
+        vix_vals = [15] * 20
+        for _ in range(20):
+            vix_vals.append(vix_vals[-1] * 1.05)
+        # 然后回落
+        for _ in range(10):
+            vix_vals.append(vix_vals[-1] * 0.95)
+
+        vix_df = _make_vix_df(vix_vals)
+        price_df = _make_price_df([100] * len(vix_vals))
+
+        signals = vix_rsi_signals(price_df, period=14, overbought=70, oversold=30, aux_data=vix_df)
+
+        buy_signals = [s for s in signals if s[1] == "BUY"]
+        assert len(buy_signals) > 0
+
+    def test_none_aux_data(self):
+        """aux_data=None → 空列表"""
+        price_df = _make_price_df([100] * 50)
+        signals = vix_rsi_signals(price_df, aux_data=None)
+        assert signals == []
+
+    def test_warmup(self):
+        """信号不应在预热期内出现"""
+        vix_vals = _make_oscillating(n=100, center=20, amplitude=10, period=30)
+        vix_df = _make_vix_df(vix_vals)
+        price_df = _make_price_df([100] * len(vix_vals))
+
+        signals = vix_rsi_signals(price_df, period=14, aux_data=vix_df)
+
+        warmup = 14 + 1
+        warmup_dates = set(vix_df["date"].iloc[:warmup].tolist())
+        for date, _ in signals:
+            assert date not in warmup_dates
+
+
 class TestSignalRegistry:
     def test_all_signals_registered(self):
         """所有信号都在注册表中"""
         assert "MACD" in SIGNAL_REGISTRY
         assert "RSI" in SIGNAL_REGISTRY
         assert "MA_Cross" in SIGNAL_REGISTRY
+        assert "New_High" in SIGNAL_REGISTRY
+        assert "VIX_MA" in SIGNAL_REGISTRY
+        assert "VIX_Spike" in SIGNAL_REGISTRY
+        assert "VIX_Percentile" in SIGNAL_REGISTRY
+        assert "VIX_RSI" in SIGNAL_REGISTRY
 
     def test_registry_callables(self):
         """注册表中的函数可调用"""
@@ -484,3 +671,26 @@ class TestAggregateStatistics:
 
         assert len(agg.index_results) == 1
         assert len(agg.per_stock_results) == 1
+
+
+# ══════════════════════════════════════════════════════════
+# Runner VIX 注入测试
+# ══════════════════════════════════════════════════════════
+
+
+class TestRunnerVIXInjection:
+    def test_vix_signal_set(self):
+        """_VIX_SIGNALS 包含所有 VIX 信号"""
+        from backtest.timing.runner import _VIX_SIGNALS
+        assert "VIX_MA" in _VIX_SIGNALS
+        assert "VIX_Spike" in _VIX_SIGNALS
+        assert "VIX_Percentile" in _VIX_SIGNALS
+        assert "VIX_RSI" in _VIX_SIGNALS
+
+    def test_non_vix_signal_not_in_set(self):
+        """非 VIX 信号不在 _VIX_SIGNALS 中"""
+        from backtest.timing.runner import _VIX_SIGNALS
+        assert "MACD" not in _VIX_SIGNALS
+        assert "RSI" not in _VIX_SIGNALS
+        assert "MA_Cross" not in _VIX_SIGNALS
+        assert "New_High" not in _VIX_SIGNALS
