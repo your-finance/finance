@@ -233,39 +233,10 @@ def _aggregate(
 
 def _approx_p_value(t: float, df: int) -> float:
     """
-    近似 t-distribution 的双尾 p-value
+    t-distribution 的双尾 p-value
 
-    对 df > 30 用正态近似 (足够精确),
-    对小 df 用 Abramowitz & Stegun 近似。
+    使用 scipy.stats.t 精确计算。
     """
-    import math
+    from scipy.stats import t as t_dist
 
-    abs_t = abs(t)
-
-    if df > 30:
-        # 正态近似
-        # erfc 近似: P(|Z|>z) ~ erfc(z/sqrt(2))
-        p = math.erfc(abs_t / math.sqrt(2))
-    else:
-        # 简单 t-distribution 近似 (Welch-Satterthwaite)
-        # 使用 Beta 正则化函数的近似
-        x = df / (df + abs_t ** 2)
-        # 不完全 Beta 函数的近似
-        # 对于小 df, 用 Laplace 近似
-        a = df / 2.0
-        b = 0.5
-        # Stirling-based 近似
-        try:
-            log_beta = (
-                math.lgamma(a) + math.lgamma(b) - math.lgamma(a + b)
-            )
-            # 正则化不完全 beta 的简单近似
-            # 用正态近似替代
-            p = math.erfc(abs_t / math.sqrt(2))
-            # 对小 df 做校正
-            correction = 1 + (abs_t ** 2 + 1) / (4 * df)
-            p = min(1.0, p * correction)
-        except (ValueError, OverflowError):
-            p = math.erfc(abs_t / math.sqrt(2))
-
-    return max(0.0, min(1.0, p))
+    return float(t_dist.sf(abs(t), df) * 2)

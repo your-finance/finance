@@ -109,11 +109,12 @@ def build_excess_return_matrix(
                 continue
             bench_rets[date_str] = bench_closes[end_i] / p0 - 1.0
 
-        # 逐行减去 benchmark 收益
-        ret_df = raw[h]
+        # 逐行减去 benchmark 收益 (copy 防止污染 raw)
+        ret_df = raw[h].copy()
         for date_str in ret_df.index:
             if date_str in bench_rets:
                 ret_df.loc[date_str] -= bench_rets[date_str]
+        raw[h] = ret_df
 
     return raw
 

@@ -72,7 +72,11 @@ def rsi_signals(
 
     rs = avg_gain / avg_loss.replace(0, np.nan)
     rsi = 100 - (100 / (1 + rs))
-    rsi = rsi.fillna(50)  # 无数据时中性
+    # avg_loss == 0 时: 纯涨 → RSI=100, 无波动 → RSI=50
+    fill_values = pd.Series(
+        np.where(avg_gain > 0, 100.0, 50.0), index=close.index
+    )
+    rsi = rsi.fillna(fill_values)
 
     # 跳过预热期
     warmup = period + 1

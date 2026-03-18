@@ -28,6 +28,9 @@ class ICResult:
     std_ic: float
     ic_ir: float               # IC_IR = mean_ic / std_ic
     ic_hit_rate: float         # IC > 0 的比率
+    n_ic_obs: int              # IC 观测数
+    t_stat: float              # t = mean_ic * sqrt(n) / std_ic
+    p_value: float             # 双尾 p-value (H0: mean_ic = 0)
     quantile_returns: Dict[int, float]  # {1..5: mean_return}
     top_bottom_spread: float   # Q5 - Q1
 
@@ -140,11 +143,22 @@ def _ic_for_horizon(
     if len(ic_series) < 3:
         return None
 
+    from scipy.stats import t as t_dist
+
     ic_arr = np.array(ic_series)
+    n_obs = len(ic_arr)
     mean_ic = float(np.mean(ic_arr))
     std_ic = float(np.std(ic_arr, ddof=1))
     ic_ir = mean_ic / std_ic if std_ic > 1e-10 else 0.0
     ic_hit_rate = float(np.mean(ic_arr > 0))
+
+    # t-test: H0: mean_ic = 0
+    if std_ic > 1e-10 and n_obs > 1:
+        t_stat = mean_ic * np.sqrt(n_obs) / std_ic
+        p_val = float(t_dist.sf(abs(t_stat), n_obs - 1) * 2)
+    else:
+        t_stat = 0.0
+        p_val = 1.0
 
     # 分位数收益
     quantile_returns = _quantile_returns(
@@ -165,6 +179,9 @@ def _ic_for_horizon(
         std_ic=std_ic,
         ic_ir=ic_ir,
         ic_hit_rate=ic_hit_rate,
+        n_ic_obs=n_obs,
+        t_stat=t_stat,
+        p_value=p_val,
         quantile_returns=quantile_returns,
         top_bottom_spread=spread,
     )

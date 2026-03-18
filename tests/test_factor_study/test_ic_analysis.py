@@ -126,9 +126,15 @@ class TestICResult:
             std_ic=0.03,
             ic_ir=1.67,
             ic_hit_rate=0.65,
+            n_ic_obs=20,
+            t_stat=2.50,
+            p_value=0.021,
             quantile_returns={1: -0.01, 2: 0.0, 3: 0.005, 4: 0.01, 5: 0.02},
             top_bottom_spread=0.03,
         )
         assert ic.factor_name == "Test"
         assert ic.horizon == 5
         assert ic.ic_ir == 1.67
+        assert ic.n_ic_obs == 20
+        assert ic.t_stat == 2.50
+        assert ic.p_value == 0.021

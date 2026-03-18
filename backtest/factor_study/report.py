@@ -117,12 +117,14 @@ def print_results(results: FactorStudyResults):
 def _print_ic_table(ic_results):
     """打印 IC 汇总表"""
     print(f"  {'Horizon':>8} {'Mean IC':>10} {'Std IC':>10} "
-          f"{'IC_IR':>8} {'Hit%':>8} {'Q5-Q1':>10}")
-    print(f"  {'─'*8} {'─'*10} {'─'*10} {'─'*8} {'─'*8} {'─'*10}")
+          f"{'IC_IR':>8} {'Hit%':>8} {'N':>6} {'t-stat':>8} {'p-val':>8} {'Q5-Q1':>10}")
+    print(f"  {'─'*8} {'─'*10} {'─'*10} {'─'*8} {'─'*8} {'─'*6} {'─'*8} {'─'*8} {'─'*10}")
     for ic in ic_results:
+        sig = "**" if ic.p_value < 0.05 else "  "
         print(f"  {ic.horizon:>8d} {ic.mean_ic:>10.4f} {ic.std_ic:>10.4f} "
               f"{ic.ic_ir:>8.2f} {ic.ic_hit_rate:>7.1%} "
-              f"{ic.top_bottom_spread:>10.4f}")
+              f"{ic.n_ic_obs:>6d} {ic.t_stat:>8.2f} {ic.p_value:>7.4f} "
+              f"{ic.top_bottom_spread:>10.4f} {sig}")
 
 
 def _print_event_section(event_results, label):
@@ -178,6 +180,9 @@ def export_csv(results: FactorStudyResults) -> Path:
                 "std_ic": ic.std_ic,
                 "ic_ir": ic.ic_ir,
                 "ic_hit_rate": ic.ic_hit_rate,
+                "n_ic_obs": ic.n_ic_obs,
+                "t_stat": ic.t_stat,
+                "p_value": ic.p_value,
                 "top_bottom_spread": ic.top_bottom_spread,
             }
             for q, ret in ic.quantile_returns.items():
@@ -229,6 +234,9 @@ def export_csv(results: FactorStudyResults) -> Path:
                 "std_ic": ic.std_ic,
                 "ic_ir": ic.ic_ir,
                 "ic_hit_rate": ic.ic_hit_rate,
+                "n_ic_obs": ic.n_ic_obs,
+                "t_stat": ic.t_stat,
+                "p_value": ic.p_value,
                 "top_bottom_spread": ic.top_bottom_spread,
             }
             for q, ret in ic.quantile_returns.items():
@@ -424,7 +432,8 @@ def _build_oos_section(all_results: List[FactorStudyResults]) -> str:
             has_oos_ic = True
             bench = _bench_display(res)
             for ic in res.oos_ic_results:
-                sig_class = ' class="sig"' if abs(ic.ic_ir) >= 0.5 else ""
+                sig_class = ' class="sig"' if ic.p_value < 0.05 else ""
+                star = "**" if ic.p_value < 0.01 else ("*" if ic.p_value < 0.05 else "")
                 bench_cell = f"<td style=\"text-align:left\">{bench}</td>" if has_multi_bench else ""
                 oos_ic_rows += f"""<tr>
                     <td style="text-align:left">{ic.factor_name}</td>
@@ -434,6 +443,9 @@ def _build_oos_section(all_results: List[FactorStudyResults]) -> str:
                     <td>{ic.std_ic:.4f}</td>
                     <td{sig_class}>{ic.ic_ir:.2f}</td>
                     <td>{ic.ic_hit_rate:.1%}</td>
+                    <td>{ic.n_ic_obs}</td>
+                    <td{sig_class}>{ic.t_stat:.2f}{star}</td>
+                    <td>{ic.p_value:.4f}</td>
                     <td>{ic.top_bottom_spread:.4f}</td>
                 </tr>"""
 
@@ -444,7 +456,8 @@ def _build_oos_section(all_results: List[FactorStudyResults]) -> str:
     oos_ic_table = f"""<table>
     <thead><tr>
         <th>因子</th>{bench_th}<th>Horizon</th><th>Mean IC</th>
-        <th>Std IC</th><th>IC_IR</th><th>Hit%</th><th>Q5-Q1</th>
+        <th>Std IC</th><th>IC_IR</th><th>Hit%</th><th>N</th>
+        <th>t-stat</th><th>p-value</th><th>Q5-Q1</th>
     </tr></thead>
     <tbody>{oos_ic_rows}</tbody>
 </table>"""
@@ -608,7 +621,8 @@ def _build_ic_table(all_results: List[FactorStudyResults]) -> str:
     for r in all_results:
         bench = _bench_display(r)
         for ic in r.ic_results:
-            sig_class = ' class="sig"' if abs(ic.ic_ir) >= 0.5 else ""
+            sig_class = ' class="sig"' if ic.p_value < 0.05 else ""
+            star = "**" if ic.p_value < 0.01 else ("*" if ic.p_value < 0.05 else "")
             bench_td = f'<td style="text-align:left">{bench}</td>' if has_multi_bench else ""
             rows += f"""<tr>
                 <td style="text-align:left">{ic.factor_name}</td>
@@ -618,6 +632,9 @@ def _build_ic_table(all_results: List[FactorStudyResults]) -> str:
                 <td>{ic.std_ic:.4f}</td>
                 <td{sig_class}>{ic.ic_ir:.2f}</td>
                 <td>{ic.ic_hit_rate:.1%}</td>
+                <td>{ic.n_ic_obs}</td>
+                <td{sig_class}>{ic.t_stat:.2f}{star}</td>
+                <td>{ic.p_value:.4f}</td>
                 <td>{ic.top_bottom_spread:.4f}</td>
             </tr>"""
 
@@ -625,7 +642,8 @@ def _build_ic_table(all_results: List[FactorStudyResults]) -> str:
 <table>
     <thead><tr>
         <th>因子</th>{bench_th}<th>Horizon</th><th>Mean IC</th>
-        <th>Std IC</th><th>IC_IR</th><th>Hit%</th><th>Q5-Q1</th>
+        <th>Std IC</th><th>IC_IR</th><th>Hit%</th><th>N</th>
+        <th>t-stat</th><th>p-value</th><th>Q5-Q1</th>
     </tr></thead>
     <tbody>{rows}</tbody>
 </table>"""

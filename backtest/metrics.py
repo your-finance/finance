@@ -193,9 +193,9 @@ def _relative_metrics(
     var_bm = cov_matrix[1, 1]
     beta = float(cov_matrix[0, 1] / var_bm) if var_bm > 1e-10 else 0.0
 
-    # Alpha = Rs_annual - Beta * Rb_annual
-    rs_annual = float(np.mean(sr) * days_per_year)
-    rb_annual = float(np.mean(br) * days_per_year)
+    # Alpha = Rs_annual - Beta * Rb_annual (geometric annualization)
+    rs_annual = float((1 + np.mean(sr)) ** days_per_year - 1)
+    rb_annual = float((1 + np.mean(br)) ** days_per_year - 1)
     alpha = rs_annual - beta * rb_annual
 
     # Tracking Error & Information Ratio

@@ -116,12 +116,10 @@ class USStocksAdapter:
 
         # 日收益率 → 横截面均值
         daily_returns = close_df.pct_change()
-        pool_avg_return = daily_returns.mean(axis=1)  # 等权
+        pool_avg_return = daily_returns.mean(axis=1).fillna(0)  # 等权, 首行=0
 
         # 累乘得 NAV (起始=100)
         nav = (1 + pool_avg_return).cumprod() * 100
-        # 第一行是 NaN (pct_change)，设为 100
-        nav.iloc[0] = 100.0
 
         result = [(d, float(v)) for d, v in nav.items() if not np.isnan(v)]
         logger.info(f"POOL_AVG NAV 合成: {len(result)} 交易日, "
