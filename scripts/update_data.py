@@ -11,7 +11,7 @@
 import argparse
 import sys
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timezone
 
 # 添加项目根目录到 path
 PROJECT_ROOT = Path(__file__).parent.parent
@@ -20,6 +20,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 from src.data.pool_manager import refresh_universe, get_symbols, print_universe_summary
 from src.data.price_fetcher import update_all_prices
 from src.data.fundamental_fetcher import update_all_fundamentals
+from config.settings import ADANOS_REQUEST_DAYS, ADANOS_TRENDING_LIMIT
 
 
 def main():
@@ -145,14 +146,56 @@ def main():
         print("=" * 40)
         print("Step 3c: 更新社交情感数据 (Adanos: Reddit + X)")
         print("=" * 40)
-        import time as _time
         from src.data.adanos_client import adanos_client
         from src.data.market_store import get_store
 
         store = get_store()
         target_symbols = symbols or get_symbols()
+        market_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         success = 0
         failed = []
+
+        for source in ("reddit", "x"):
+            try:
+                row = adanos_client.get_market_sentiment_row(
+                    source=source,
+                    days=ADANOS_REQUEST_DAYS,
+                )
+                if row is None:
+                    print("  {} market {}/market-sentiment: request failed".format(chr(10007), source))
+                else:
+                    count = store.upsert_market_sentiment([row])
+                    print("  {} market {}/market-sentiment: {} row".format(chr(10003), source, count))
+            except Exception as e:
+                print("  {} market {}/market-sentiment: {}".format(chr(10007), source, e))
+
+            try:
+                rows = adanos_client.get_trending_rows(
+                    source=source,
+                    days=ADANOS_REQUEST_DAYS,
+                    limit=ADANOS_TRENDING_LIMIT,
+                )
+                if rows is None:
+                    print("  {} market {}/trending: request failed".format(chr(10007), source))
+                else:
+                    count = store.upsert_social_trending(market_date, source, rows)
+                    print("  {} market {}/trending: {} rows".format(chr(10003), source, count))
+            except Exception as e:
+                print("  {} market {}/trending: {}".format(chr(10007), source, e))
+
+            try:
+                rows = adanos_client.get_trending_sectors_rows(
+                    source=source,
+                    days=ADANOS_REQUEST_DAYS,
+                    limit=ADANOS_TRENDING_LIMIT,
+                )
+                if rows is None:
+                    print("  {} market {}/trending/sectors: request failed".format(chr(10007), source))
+                else:
+                    count = store.upsert_social_trending_sectors(market_date, source, rows)
+                    print("  {} market {}/trending/sectors: {} rows".format(chr(10003), source, count))
+            except Exception as e:
+                print("  {} market {}/trending/sectors: {}".format(chr(10007), source, e))
 
         for sym in target_symbols:
             sym_ok = True

@@ -39,6 +39,99 @@ def _make_rows(source="reddit", days=3, base_mentions=100):
     return rows
 
 
+def _make_trending_rows(source="reddit", count=3, date="2026-03-25"):
+    rows = []
+    for rank in range(1, count + 1):
+        rows.append({
+            "date": date,
+            "source": source,
+            "rank": rank,
+            "ticker": "T{:02d}".format(rank),
+            "company_name": "Company {}".format(rank),
+            "buzz_score": 90.0 - rank,
+            "trend": "rising" if rank == 1 else "stable",
+            "mentions": 1000 - rank * 10,
+            "sentiment_score": 0.1 * rank,
+            "bullish_pct": 40 + rank,
+            "bearish_pct": 20 - rank,
+            "total_upvotes": 10000 + rank,
+            "trend_history": "[70.0, 80.0, 90.0]",
+            "unique_posts": 500 + rank,
+            "subreddit_count": 10 if source == "reddit" else None,
+            "is_validated": None if source == "reddit" else 1,
+            "period_days": 7,
+            "created_at": "2026-03-25T22:55:00Z",
+        })
+    return rows
+
+
+def _make_sector_rows(source="reddit", date="2026-03-25"):
+    return [
+        {
+            "date": date,
+            "source": source,
+            "sector": "Information Technology",
+            "buzz_score": 91.4,
+            "trend": "stable",
+            "mentions": 22435,
+            "unique_tickers": 227,
+            "sentiment_score": 0.318,
+            "bullish_pct": 67,
+            "bearish_pct": 11,
+            "total_upvotes": 389894,
+            "top_tickers": '["NVDA","MSTR","AAPL"]',
+            "subreddit_count": 50 if source == "reddit" else None,
+            "unique_authors": None if source == "reddit" else 11217,
+            "period_days": 7,
+            "created_at": "2026-03-25T22:55:00Z",
+        },
+        {
+            "date": date,
+            "source": source,
+            "sector": "Financials",
+            "buzz_score": 85.0,
+            "trend": "rising",
+            "mentions": 12046,
+            "unique_tickers": 536,
+            "sentiment_score": 0.083,
+            "bullish_pct": 70,
+            "bearish_pct": 45,
+            "total_upvotes": 38017,
+            "top_tickers": '["SPY","VOO"]',
+            "subreddit_count": 50 if source == "reddit" else None,
+            "unique_authors": None if source == "reddit" else 9000,
+            "period_days": 7,
+            "created_at": "2026-03-25T22:55:00Z",
+        },
+    ]
+
+
+def _make_market_sentiment_rows(source="reddit", date="2026-03-25", buzz_score=47.7):
+    return [{
+        "date": date,
+        "source": source,
+        "buzz_score": buzz_score,
+        "trend": "stable" if source == "reddit" else "rising",
+        "mentions": 54836 if source == "reddit" else 44488,
+        "unique_posts": 21190 if source == "reddit" else 44209,
+        "unique_authors": None if source == "reddit" else 18688,
+        "subreddit_count": 52 if source == "reddit" else None,
+        "total_upvotes": 122458 if source == "reddit" else 941035,
+        "active_tickers": 2764 if source == "reddit" else 1124,
+        "sentiment_score": 0.043 if source == "reddit" else 0.299,
+        "positive_count": 20091 if source == "reddit" else 28809,
+        "negative_count": 14603 if source == "reddit" else 5872,
+        "neutral_count": 20142 if source == "reddit" else 9807,
+        "bullish_pct": 37 if source == "reddit" else 65,
+        "bearish_pct": 27 if source == "reddit" else 13,
+        "trend_history": "[49.8, 50.1, 50.0, 49.7, 49.7, 49.2, 47.7]",
+        "drivers": '[{"ticker":"GOOGL"}]',
+        "raw_json": '{"buzz_score": 47.7}',
+        "period_days": 7,
+        "created_at": "2026-03-25T22:55:00Z",
+    }]
+
+
 class TestUpsertSocialSentiment:
 
     def test_basic_upsert(self, store):
@@ -153,11 +246,15 @@ class TestSchemaIntegrity:
     def test_social_sentiment_in_stats(self, store):
         stats = store.get_stats()
         assert "social_sentiment" in stats
+        assert "market_sentiment" in stats
         assert stats["social_sentiment"] == 0
 
     def test_social_sentiment_in_valid_tables(self):
         from src.data.market_store import _VALID_TABLES
         assert "social_sentiment" in _VALID_TABLES
+        assert "market_sentiment" in _VALID_TABLES
+        assert "social_trending" in _VALID_TABLES
+        assert "social_trending_sectors" in _VALID_TABLES
 
     def test_all_fields_stored(self, store):
         rows = _make_rows("reddit", 1)
@@ -180,3 +277,101 @@ class TestSchemaIntegrity:
         assert result["top_subreddits"] == '[{"subreddit": "wsb"}]'
         assert result["period_days"] == 7
         assert result["created_at"] == "2026-03-10T07:00:00"
+
+
+class TestSocialTrendingStore:
+
+    def test_upsert_social_trending_replaces_day_source_snapshot(self, store):
+        date = "2026-03-25"
+        store.upsert_social_trending(date, "reddit", _make_trending_rows("reddit", count=3))
+        store.upsert_social_trending(date, "reddit", _make_trending_rows("reddit", count=2))
+
+        rows = store.get_social_trending(date, "reddit")
+        assert len(rows) == 2
+        assert [r["rank"] for r in rows] == [1, 2]
+
+    def test_upsert_social_trending_empty_rows_clears_existing(self, store):
+        date = "2026-03-25"
+        store.upsert_social_trending(date, "x", _make_trending_rows("x", count=2))
+        cleared = store.upsert_social_trending(date, "x", [])
+
+        assert cleared == 0
+        assert store.get_social_trending(date, "x") == []
+
+    def test_get_social_trending_orders_by_rank(self, store):
+        date = "2026-03-25"
+        rows = _make_trending_rows("reddit", count=3)
+        rows[0]["rank"] = 3
+        rows[1]["rank"] = 1
+        rows[2]["rank"] = 2
+        store.upsert_social_trending(date, "reddit", rows)
+
+        result = store.get_social_trending(date, "reddit")
+        assert [r["rank"] for r in result] == [1, 2, 3]
+
+
+class TestSocialTrendingSectorsStore:
+
+    def test_upsert_social_trending_sectors_replaces_day_source_snapshot(self, store):
+        date = "2026-03-25"
+        store.upsert_social_trending_sectors(date, "reddit", _make_sector_rows("reddit"))
+        store.upsert_social_trending_sectors(date, "reddit", _make_sector_rows("reddit")[:1])
+
+        rows = store.get_social_trending_sectors(date, "reddit")
+        assert len(rows) == 1
+        assert rows[0]["sector"] == "Information Technology"
+
+    def test_get_social_trending_sectors_orders_by_buzz_score(self, store):
+        date = "2026-03-25"
+        store.upsert_social_trending_sectors(date, "x", _make_sector_rows("x"))
+
+        rows = store.get_social_trending_sectors(date, "x")
+        assert len(rows) == 2
+        assert rows[0]["buzz_score"] >= rows[1]["buzz_score"]
+
+    def test_sector_fields_round_trip(self, store):
+        date = "2026-03-25"
+        store.upsert_social_trending_sectors(date, "x", _make_sector_rows("x")[:1])
+
+        row = store.get_social_trending_sectors(date, "x")[0]
+        assert row["unique_authors"] == 11217
+        assert row["top_tickers"] == '["NVDA","MSTR","AAPL"]'
+        assert row["period_days"] == 7
+
+
+class TestMarketSentimentStore:
+
+    def test_upsert_market_sentiment_replaces_on_conflict(self, store):
+        store.upsert_market_sentiment(_make_market_sentiment_rows("reddit", buzz_score=47.7))
+        store.upsert_market_sentiment(_make_market_sentiment_rows("reddit", buzz_score=51.2))
+
+        rows = store.get_market_sentiment(source="reddit", limit=5)
+        assert len(rows) == 1
+        assert rows[0]["buzz_score"] == 51.2
+
+    def test_get_market_sentiment_with_source_filter(self, store):
+        store.upsert_market_sentiment(_make_market_sentiment_rows("reddit"))
+        store.upsert_market_sentiment(_make_market_sentiment_rows("x"))
+
+        reddit_rows = store.get_market_sentiment(source="reddit", limit=5)
+        assert len(reddit_rows) == 1
+        assert reddit_rows[0]["source"] == "reddit"
+
+    def test_latest_market_sentiment(self, store):
+        store.upsert_market_sentiment(_make_market_sentiment_rows("reddit", date="2026-03-24", buzz_score=40.0))
+        store.upsert_market_sentiment(_make_market_sentiment_rows("reddit", date="2026-03-25", buzz_score=47.7))
+
+        latest = store.get_latest_market_sentiment(source="reddit")
+        assert latest is not None
+        assert latest["date"] == "2026-03-25"
+        assert latest["active_tickers"] == 2764
+
+    def test_market_sentiment_fields_round_trip(self, store):
+        store.upsert_market_sentiment(_make_market_sentiment_rows("x"))
+
+        row = store.get_latest_market_sentiment(source="x")
+        assert row is not None
+        assert row["unique_posts"] == 44209
+        assert row["unique_authors"] == 18688
+        assert row["raw_json"] == '{"buzz_score": 47.7}'
+        assert row["period_days"] == 7

@@ -388,6 +388,7 @@ ADANOS_API_KEY = os.environ.get("ADANOS_API_KEY", "")
 ADANOS_BASE_URL = "https://api.adanos.org"
 ADANOS_CALL_INTERVAL = 2  # 秒，防限流
 ADANOS_REQUEST_DAYS = 7   # 每次请求回看天数（upsert 覆盖，自动补漏）
+ADANOS_TRENDING_LIMIT = 20  # 市场级 trending / sectors 默认保留条数
 
 # Telegram 配置 (从环境变量读取)
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")

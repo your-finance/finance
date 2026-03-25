@@ -15,7 +15,7 @@ Usage:
 import json
 import logging
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 import requests
@@ -30,6 +30,23 @@ from config.settings import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _utc_now() -> datetime:
+    """Return timezone-aware UTC timestamp."""
+    return datetime.now(timezone.utc)
+
+
+def _isoformat_utc(ts: datetime) -> str:
+    """Serialize UTC timestamp with trailing Z."""
+    return ts.isoformat().replace("+00:00", "Z")
+
+
+def _json_or_none(value: Any) -> Optional[str]:
+    """Serialize JSON-compatible value, preserving None."""
+    if value is None:
+        return None
+    return json.dumps(value, ensure_ascii=False)
 
 # Source config: endpoint prefix + field mappings for normalization
 _SOURCE_CONFIG = {
@@ -61,10 +78,10 @@ class AdanosClient:
             time.sleep(ADANOS_CALL_INTERVAL - elapsed)
         self._last_call_time = time.time()
 
-    def _request(self, endpoint: str, params: Optional[Dict] = None) -> Optional[Dict]:
+    def _request(self, endpoint: str, params: Optional[Dict] = None) -> Optional[Any]:
         """Make authenticated GET request with retry logic.
 
-        Returns parsed JSON dict on success, None on failure.
+        Returns parsed JSON payload on success, None on failure.
         """
         if not self.api_key:
             logger.error("ADANOS_API_KEY not configured")
@@ -170,7 +187,8 @@ class AdanosClient:
             return []
 
         config = _SOURCE_CONFIG[source]
-        now = datetime.now().isoformat()
+        now = _utc_now()
+        created_at = _isoformat_utc(now)
         daily_trend = data.get("daily_trend", [])
 
         if not daily_trend:
@@ -178,11 +196,11 @@ class AdanosClient:
 
         # Serialize top_mentions/top_tweets → JSON string
         top_mentions_raw = data.get(config["top_mentions_field"], [])
-        top_mentions_json = json.dumps(top_mentions_raw, ensure_ascii=False) if top_mentions_raw else None
+        top_mentions_json = _json_or_none(top_mentions_raw) if top_mentions_raw else None
 
         # Serialize top_subreddits → JSON string (Reddit only)
         top_subreddits_raw = data.get("top_subreddits", [])
-        top_subreddits_json = json.dumps(top_subreddits_raw, ensure_ascii=False) if top_subreddits_raw else None
+        top_subreddits_json = _json_or_none(top_subreddits_raw) if top_subreddits_raw else None
 
         rows = []
         # Find actual latest date (API ordering not guaranteed across sources)
@@ -202,7 +220,7 @@ class AdanosClient:
                 # Per-day fields (from daily_trend array)
                 "buzz_score": day.get("buzz_score") if day.get("buzz_score") is not None else data.get("buzz_score"),
                 "total_mentions": day.get("mentions"),
-                "sentiment_score": day.get("sentiment"),
+                "sentiment_score": day.get("sentiment_score"),
                 # Period-level aggregates (only on latest day to avoid
                 # misleading downstream consumers — these cover the full
                 # request period, not individual days)
@@ -222,7 +240,7 @@ class AdanosClient:
                 "top_subreddits": top_subreddits_json if is_latest else None,
                 # Metadata
                 "period_days": data.get("period_days", days),
-                "created_at": now,
+                "created_at": created_at,
             }
             rows.append(row)
 
@@ -233,10 +251,10 @@ class AdanosClient:
         source: str = "reddit",
         days: int = 7,
         limit: int = 20,
-    ) -> List[Dict[str, Any]]:
+    ) -> Optional[List[Dict[str, Any]]]:
         """Fetch trending stocks for a source.
 
-        Returns list of trending stock dicts, or empty list on failure.
+        Returns list of trending stock dicts on success, None on failure.
         """
         if source not in _SOURCE_CONFIG:
             raise ValueError("Invalid source: {}".format(source))
@@ -246,9 +264,172 @@ class AdanosClient:
         data = self._request(endpoint, params={"days": days, "limit": limit})
 
         if data is None:
-            return []
+            return None
 
         return data if isinstance(data, list) else []
+
+    def get_market_sentiment(
+        self,
+        source: str = "reddit",
+        days: int = ADANOS_REQUEST_DAYS,
+    ) -> Optional[Dict[str, Any]]:
+        """Fetch market-level sentiment snapshot for a source."""
+        if source not in _SOURCE_CONFIG:
+            raise ValueError("Invalid source: {}".format(source))
+
+        config = _SOURCE_CONFIG[source]
+        endpoint = "{}/market-sentiment".format(config["prefix"])
+        data = self._request(endpoint, params={"days": days})
+
+        if data is None:
+            return None
+
+        return data if isinstance(data, dict) else None
+
+    def get_market_sentiment_row(
+        self,
+        source: str = "reddit",
+        days: int = ADANOS_REQUEST_DAYS,
+    ) -> Optional[Dict[str, Any]]:
+        """Fetch market-level sentiment snapshot and convert it to a DB-ready row."""
+        data = self.get_market_sentiment(source=source, days=days)
+        if data is None:
+            return None
+
+        config = _SOURCE_CONFIG[source]
+        now = _utc_now()
+        date_str = now.strftime("%Y-%m-%d")
+        created_at = _isoformat_utc(now)
+
+        return {
+            "date": date_str,
+            "source": source,
+            "buzz_score": data.get("buzz_score"),
+            "trend": data.get("trend"),
+            "mentions": data.get("mentions"),
+            "unique_posts": data.get(config["unique_posts_field"]),
+            "unique_authors": data.get("unique_authors"),
+            "subreddit_count": data.get("subreddit_count"),
+            "total_upvotes": data.get("total_upvotes"),
+            "active_tickers": data.get("active_tickers"),
+            "sentiment_score": data.get("sentiment_score"),
+            "positive_count": data.get("positive_count"),
+            "negative_count": data.get("negative_count"),
+            "neutral_count": data.get("neutral_count"),
+            "bullish_pct": data.get("bullish_pct"),
+            "bearish_pct": data.get("bearish_pct"),
+            "trend_history": _json_or_none(data.get("trend_history")),
+            "drivers": _json_or_none(data.get("drivers")),
+            "raw_json": _json_or_none(data),
+            "period_days": days,
+            "created_at": created_at,
+        }
+
+    def get_trending_rows(
+        self,
+        source: str = "reddit",
+        days: int = 7,
+        limit: int = 20,
+    ) -> Optional[List[Dict[str, Any]]]:
+        """Fetch trending stocks and convert them to DB-ready rows."""
+        data = self.get_trending(source=source, days=days, limit=limit)
+        if data is None:
+            return None
+
+        config = _SOURCE_CONFIG[source]
+        now = _utc_now()
+        date_str = now.strftime("%Y-%m-%d")
+        created_at = _isoformat_utc(now)
+        rows = []
+
+        for rank, item in enumerate(data, start=1):
+            is_validated = None
+            if source == "x":
+                validated = item.get("is_validated")
+                if validated is True:
+                    is_validated = 1
+                elif validated is False:
+                    is_validated = 0
+
+            rows.append({
+                "date": date_str,
+                "source": source,
+                "rank": rank,
+                "ticker": item.get("ticker"),
+                "company_name": item.get("company_name"),
+                "buzz_score": item.get("buzz_score"),
+                "trend": item.get("trend"),
+                "mentions": item.get("mentions"),
+                "sentiment_score": item.get("sentiment_score"),
+                "bullish_pct": item.get("bullish_pct"),
+                "bearish_pct": item.get("bearish_pct"),
+                "total_upvotes": item.get("total_upvotes"),
+                "trend_history": _json_or_none(item.get("trend_history")),
+                "unique_posts": item.get(config["unique_posts_field"]),
+                "subreddit_count": item.get("subreddit_count"),
+                "is_validated": is_validated,
+                "period_days": days,
+                "created_at": created_at,
+            })
+
+        return rows
+
+    def get_trending_sectors(
+        self,
+        source: str = "reddit",
+        days: int = 7,
+        limit: int = 20,
+    ) -> Optional[List[Dict[str, Any]]]:
+        """Fetch trending sectors for a source."""
+        if source not in _SOURCE_CONFIG:
+            raise ValueError("Invalid source: {}".format(source))
+
+        config = _SOURCE_CONFIG[source]
+        endpoint = "{}/trending/sectors".format(config["prefix"])
+        data = self._request(endpoint, params={"days": days, "limit": limit})
+
+        if data is None:
+            return None
+
+        return data if isinstance(data, list) else []
+
+    def get_trending_sectors_rows(
+        self,
+        source: str = "reddit",
+        days: int = 7,
+        limit: int = 20,
+    ) -> Optional[List[Dict[str, Any]]]:
+        """Fetch trending sectors and convert them to DB-ready rows."""
+        data = self.get_trending_sectors(source=source, days=days, limit=limit)
+        if data is None:
+            return None
+
+        now = _utc_now()
+        date_str = now.strftime("%Y-%m-%d")
+        created_at = _isoformat_utc(now)
+        rows = []
+
+        for item in data:
+            rows.append({
+                "date": date_str,
+                "source": source,
+                "sector": item.get("sector"),
+                "buzz_score": item.get("buzz_score"),
+                "trend": item.get("trend"),
+                "mentions": item.get("mentions"),
+                "unique_tickers": item.get("unique_tickers"),
+                "sentiment_score": item.get("sentiment_score"),
+                "bullish_pct": item.get("bullish_pct"),
+                "bearish_pct": item.get("bearish_pct"),
+                "total_upvotes": item.get("total_upvotes"),
+                "top_tickers": _json_or_none(item.get("top_tickers")),
+                "subreddit_count": item.get("subreddit_count"),
+                "unique_authors": item.get("unique_authors"),
+                "period_days": days,
+                "created_at": created_at,
+            })
+
+        return rows
 
 
 # Module-level singleton

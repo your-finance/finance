@@ -323,6 +323,91 @@ _SCHEMA = "\n\n".join([
     "CREATE INDEX IF NOT EXISTS idx_social_date ON social_sentiment(date);",
     "CREATE INDEX IF NOT EXISTS idx_social_symbol ON social_sentiment(symbol);",
 
+    # -- Market sentiment snapshots (Adanos market-level aggregate) --
+    """CREATE TABLE IF NOT EXISTS market_sentiment (
+    date TEXT NOT NULL,
+    source TEXT NOT NULL,
+
+    buzz_score REAL,
+    trend TEXT,
+    mentions INTEGER,
+    unique_posts INTEGER,
+    unique_authors INTEGER,
+    subreddit_count INTEGER,
+    total_upvotes INTEGER,
+    active_tickers INTEGER,
+    sentiment_score REAL,
+    positive_count INTEGER,
+    negative_count INTEGER,
+    neutral_count INTEGER,
+    bullish_pct INTEGER,
+    bearish_pct INTEGER,
+    trend_history TEXT,
+    drivers TEXT,
+    raw_json TEXT,
+
+    period_days INTEGER,
+    created_at TEXT NOT NULL,
+
+    PRIMARY KEY (date, source)
+);""",
+    "CREATE INDEX IF NOT EXISTS idx_ms_source_date ON market_sentiment(source, date);",
+
+    # -- Social trending snapshots (Adanos market-level) --
+    """CREATE TABLE IF NOT EXISTS social_trending (
+    date TEXT NOT NULL,
+    source TEXT NOT NULL,
+    rank INTEGER NOT NULL,
+
+    ticker TEXT NOT NULL,
+    company_name TEXT,
+    buzz_score REAL,
+    trend TEXT,
+    mentions INTEGER,
+    sentiment_score REAL,
+    bullish_pct INTEGER,
+    bearish_pct INTEGER,
+    total_upvotes INTEGER,
+    trend_history TEXT,
+
+    unique_posts INTEGER,
+    subreddit_count INTEGER,
+    is_validated INTEGER,
+
+    period_days INTEGER,
+    created_at TEXT NOT NULL,
+
+    PRIMARY KEY (date, source, rank)
+);""",
+    "CREATE INDEX IF NOT EXISTS idx_st_ticker ON social_trending(ticker);",
+    "CREATE INDEX IF NOT EXISTS idx_st_date ON social_trending(date);",
+
+    # -- Social trending sectors snapshots (Adanos market-level) --
+    """CREATE TABLE IF NOT EXISTS social_trending_sectors (
+    date TEXT NOT NULL,
+    source TEXT NOT NULL,
+
+    sector TEXT NOT NULL,
+    buzz_score REAL,
+    trend TEXT,
+    mentions INTEGER,
+    unique_tickers INTEGER,
+    sentiment_score REAL,
+    bullish_pct INTEGER,
+    bearish_pct INTEGER,
+    total_upvotes INTEGER,
+    top_tickers TEXT,
+
+    subreddit_count INTEGER,
+    unique_authors INTEGER,
+
+    period_days INTEGER,
+    created_at TEXT NOT NULL,
+
+    PRIMARY KEY (date, source, sector)
+);""",
+    "CREATE INDEX IF NOT EXISTS idx_sts_date ON social_trending_sectors(date);",
+
     # Broad market RVOL scan hits (for factor backtesting)
     """CREATE TABLE IF NOT EXISTS broad_scan_hits (
     symbol TEXT NOT NULL,
@@ -354,7 +439,9 @@ _VALID_TABLES = frozenset({
     "cash_flow_quarterly", "ratios_annual", "metrics_quarterly",
     "iv_daily", "options_snapshots",
     "forward_estimates", "forward_metadata",
-    "social_sentiment", "broad_scan_hits",
+    "social_sentiment", "market_sentiment",
+    "social_trending",
+    "social_trending_sectors", "broad_scan_hits",
 })
 
 
@@ -775,6 +862,163 @@ class MarketStore:
                 result[sym] = [dict(r) for r in rows]
 
         return result
+
+    def upsert_market_sentiment(self, rows: List[Dict[str, Any]]) -> int:
+        """Replace market sentiment rows by (date, source)."""
+        if not rows:
+            return 0
+        conn = self._get_conn()
+        valid_cols = _get_table_columns("market_sentiment", conn)
+        count = 0
+        with conn:
+            snapshots = {
+                (row.get("date"), row.get("source"))
+                for row in rows
+                if row.get("date") and row.get("source")
+            }
+            for date, source in snapshots:
+                conn.execute(
+                    "DELETE FROM market_sentiment WHERE date = ? AND source = ?",
+                    [date, source],
+                )
+            for row in rows:
+                data = {k: v for k, v in row.items() if k in valid_cols}
+                if not data.get("date") or not data.get("source"):
+                    continue
+                cols = [c for c in data if c in valid_cols]
+                placeholders = ", ".join(["?"] * len(cols))
+                col_names = ", ".join(cols)
+                values = [data[c] for c in cols]
+                conn.execute(
+                    "INSERT INTO market_sentiment ({}) VALUES ({})".format(
+                        col_names, placeholders),
+                    values,
+                )
+                count += 1
+        return count
+
+    def get_market_sentiment(
+        self,
+        source: Optional[str] = None,
+        limit: int = 30,
+    ) -> List[Dict[str, Any]]:
+        """Get market sentiment history, newest first."""
+        conn = self._get_conn()
+        query = "SELECT * FROM market_sentiment"
+        params: list = []
+        if source:
+            query += " WHERE source = ?"
+            params.append(source)
+        query += " ORDER BY date DESC, source ASC LIMIT ?"
+        params.append(limit)
+        rows = conn.execute(query, params).fetchall()
+        return [dict(r) for r in rows]
+
+    def get_latest_market_sentiment(
+        self,
+        source: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """Get most recent market sentiment snapshot."""
+        rows = self.get_market_sentiment(source=source, limit=1)
+        return rows[0] if rows else None
+
+    def upsert_social_trending(
+        self,
+        date: str,
+        source: str,
+        rows: List[Dict[str, Any]],
+    ) -> int:
+        """Replace all trending rows for a given UTC date + source."""
+        conn = self._get_conn()
+        valid_cols = _get_table_columns("social_trending", conn)
+        count = 0
+
+        with conn:
+            conn.execute(
+                "DELETE FROM social_trending WHERE date = ? AND source = ?",
+                [date, source],
+            )
+            for row in rows:
+                data = {k: v for k, v in row.items() if k in valid_cols}
+                data["date"] = date
+                data["source"] = source
+                if not data.get("rank") or not data.get("ticker"):
+                    continue
+                cols = [c for c in data if c in valid_cols]
+                placeholders = ", ".join(["?"] * len(cols))
+                col_names = ", ".join(cols)
+                values = [data[c] for c in cols]
+                conn.execute(
+                    "INSERT INTO social_trending ({}) VALUES ({})".format(
+                        col_names, placeholders),
+                    values,
+                )
+                count += 1
+
+        return count
+
+    def get_social_trending(
+        self,
+        date: str,
+        source: str,
+    ) -> List[Dict[str, Any]]:
+        """Get trending rows for a UTC date + source ordered by rank."""
+        conn = self._get_conn()
+        rows = conn.execute(
+            "SELECT * FROM social_trending WHERE date = ? AND source = ? ORDER BY rank ASC",
+            [date, source],
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def upsert_social_trending_sectors(
+        self,
+        date: str,
+        source: str,
+        rows: List[Dict[str, Any]],
+    ) -> int:
+        """Replace all sector snapshot rows for a given UTC date + source."""
+        conn = self._get_conn()
+        valid_cols = _get_table_columns("social_trending_sectors", conn)
+        count = 0
+
+        with conn:
+            conn.execute(
+                "DELETE FROM social_trending_sectors WHERE date = ? AND source = ?",
+                [date, source],
+            )
+            for row in rows:
+                data = {k: v for k, v in row.items() if k in valid_cols}
+                data["date"] = date
+                data["source"] = source
+                if not data.get("sector"):
+                    continue
+                cols = [c for c in data if c in valid_cols]
+                placeholders = ", ".join(["?"] * len(cols))
+                col_names = ", ".join(cols)
+                values = [data[c] for c in cols]
+                conn.execute(
+                    "INSERT INTO social_trending_sectors ({}) VALUES ({})".format(
+                        col_names, placeholders),
+                    values,
+                )
+                count += 1
+
+        return count
+
+    def get_social_trending_sectors(
+        self,
+        date: str,
+        source: str,
+    ) -> List[Dict[str, Any]]:
+        """Get sector snapshot rows for a UTC date + source."""
+        conn = self._get_conn()
+        rows = conn.execute(
+            """SELECT * FROM social_trending_sectors
+               WHERE date = ? AND source = ?
+               ORDER BY buzz_score DESC, sector ASC""",
+            [date, source],
+        ).fetchall()
+        return [dict(r) for r in rows]
 
     # ---- Screener ----
 
