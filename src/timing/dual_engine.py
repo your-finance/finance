@@ -30,10 +30,13 @@ class DualEngineConfig:
     bbwp_std: float = 1.0
     bbwp_lookback: int = 252
     rvol_window: int = 20
+    # Helen v2.0: more aggressive mapping — full position at +0.03%
     right_bear_slope_pct: float = -0.03
-    right_neutral_slope_pct: float = 0.03
-    right_trend_slope_pct: float = 0.10
+    right_neutral_slope_pct: float = 0.0
+    right_trend_slope_pct: float = 0.03
     risk_mode: str = "balanced"
+    # Helen v2.0: natural handoff — left holds until right takes over or max hold expires
+    left_max_hold_bars: int = 540  # 90 days × 6 bars/day for 4H
 
 
 @dataclass
@@ -46,6 +49,7 @@ class DualEngineState:
     left_latch_active: bool = False
     left_latch_position: float = 0.0
     left_trigger_price: Optional[float] = None
+    left_hold_counter: int = 0
 
 
 @dataclass
@@ -120,7 +124,7 @@ def evaluate_dual_engine_snapshot(
     timestamp = tf4h.get("timestamp") or ""
 
     _update_risk_state(state, tf4h, tf1d, latest_close, reasons)
-    left_position = _update_left_state(state, tf4h, tf1d, latest_close, reasons)
+    left_position = _update_left_state(state, tf4h, tf1d, latest_close, reasons, config=config)
     right_raw = _calculate_right_position(tf4h, tf1d, config)
     right_risked = round(right_raw * state.k, 2)
     final_target = round(max(right_risked, left_position), 2)
@@ -258,66 +262,10 @@ def _update_risk_state(
     latest_close: Optional[float],
     reasons: List[str],
 ) -> None:
-    pmarp = tf4h["pmarp"]
-    bbwp = tf4h["bbwp"]
-    daily_slope = tf1d.get("ema_slope_pct")
-
-    if latest_close is None:
-        state.k = 1.0
-        return
-
-    if not state.risk_active and _should_activate_risk(state.risk_mode, pmarp, bbwp):
-        state.risk_active = True
-        state.escape_price = latest_close
-        state.risk_breakout_streak = 0
-        reasons.append(f"risk_triggered:{state.risk_mode}")
-
-    if state.risk_active:
-        if state.escape_price is not None and latest_close > state.escape_price:
-            state.risk_breakout_streak += 1
-        else:
-            state.risk_breakout_streak = 0
-
-        if _should_recover_risk(state, pmarp):
-            state.risk_active = False
-            state.escape_price = None
-            state.risk_breakout_streak = 0
-            state.k = 1.0
-            reasons.append("risk_recovered")
-            return
-
-        base_k = {"surf": 0.7, "balanced": 0.4, "fortress": 0.0}.get(state.risk_mode, 0.4)
-        state.k = base_k if (daily_slope is not None and daily_slope > 0) else 0.0
-        reasons.append(f"risk_active:k={state.k:.2f}")
-    else:
-        state.k = 1.0
-
-
-def _should_activate_risk(
-    mode: str,
-    pmarp: Dict[str, Any],
-    bbwp: Dict[str, Any],
-) -> bool:
-    pmarp_high_down_98 = _high_zone_turn_down(pmarp, 98)
-    pmarp_high_down_90 = _high_zone_turn_down(pmarp, 90)
-    bbwp_high_down = _high_zone_turn_down(bbwp, 98)
-
-    if mode == "surf":
-        return pmarp_high_down_98 and bbwp_high_down
-    if mode == "fortress":
-        return pmarp_high_down_90
-    return pmarp_high_down_98 or bbwp_high_down
-
-
-def _should_recover_risk(state: DualEngineState, pmarp: Dict[str, Any]) -> bool:
-    current = pmarp.get("current")
-    breakout = state.escape_price is not None and state.risk_breakout_streak > 0
-
-    if state.risk_mode == "surf":
-        return breakout
-    if state.risk_mode == "fortress":
-        return (current is not None and current < 30) or state.risk_breakout_streak >= 3
-    return (current is not None and current < 50) or breakout
+    # Helen v2.0: risk module removed — trend exit (EMA slope < 0) provides
+    # all crash protection. K is always 1.0.
+    state.k = 1.0
+    state.risk_active = False
 
 
 def _update_left_state(
@@ -326,22 +274,31 @@ def _update_left_state(
     tf1d: Dict[str, Any],
     latest_close: Optional[float],
     reasons: List[str],
+    config: Optional["DualEngineConfig"] = None,
 ) -> float:
+    """Helen v2.0: natural handoff — left holds until right takes over or max hold expires."""
     if latest_close is None:
         return 0.0
+
+    max_hold = config.left_max_hold_bars if config else 540
 
     pmarp_4h = tf4h["pmarp"]
     pmarp_1d = tf1d["pmarp"]
 
     if state.left_latch_active:
+        state.left_hold_counter += 1
+        # Exit 1: hard stop -20%
         if state.left_trigger_price is not None and latest_close <= state.left_trigger_price * 0.8:
             reasons.append("left_hard_stop")
             _clear_left_latch(state)
             return 0.0
-        if pmarp_4h.get("current") is not None and pmarp_4h["current"] > 50:
-            reasons.append("left_handoff_exit")
+        # Exit 2: max hold period expired
+        if max_hold > 0 and state.left_hold_counter >= max_hold:
+            reasons.append("left_max_hold_exit")
             _clear_left_latch(state)
             return 0.0
+        # No explicit handoff — left stays latched.
+        # MAX(right, left) naturally transitions when right > left.
         return state.left_latch_position
 
     x_base = 0.0
@@ -360,6 +317,7 @@ def _update_left_state(
         state.left_latch_active = True
         state.left_latch_position = left_position
         state.left_trigger_price = latest_close
+        state.left_hold_counter = 0
         reasons.append(f"left_latch:{left_position:.2f}")
 
     return left_position
@@ -369,6 +327,7 @@ def _clear_left_latch(state: DualEngineState) -> None:
     state.left_latch_active = False
     state.left_latch_position = 0.0
     state.left_trigger_price = None
+    state.left_hold_counter = 0
 
 
 def _bbwp_multiplier(

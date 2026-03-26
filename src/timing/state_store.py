@@ -41,6 +41,7 @@ class DualEngineStateStore:
                     left_latch_active INTEGER NOT NULL,
                     left_latch_position REAL NOT NULL,
                     left_trigger_price REAL,
+                    left_hold_counter INTEGER NOT NULL DEFAULT 0,
                     updated_at TEXT NOT NULL
                 )
                 """
@@ -99,7 +100,8 @@ class DualEngineStateStore:
             row = conn.execute(
                 """
                 SELECT risk_mode, risk_active, escape_price, k, risk_breakout_streak,
-                       left_latch_active, left_latch_position, left_trigger_price
+                       left_latch_active, left_latch_position, left_trigger_price,
+                       left_hold_counter
                 FROM engine_state
                 WHERE system_name = ?
                 """,
@@ -118,6 +120,7 @@ class DualEngineStateStore:
             left_latch_active=bool(row[5]),
             left_latch_position=float(row[6]),
             left_trigger_price=row[7],
+            left_hold_counter=int(row[8]),
         )
 
     def save(self, state: DualEngineState, system_name: str = "btc_dual_engine") -> None:
@@ -131,8 +134,8 @@ class DualEngineStateStore:
                 INSERT INTO engine_state (
                     system_name, risk_mode, risk_active, escape_price, k,
                     risk_breakout_streak, left_latch_active, left_latch_position,
-                    left_trigger_price, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    left_trigger_price, left_hold_counter, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(system_name) DO UPDATE SET
                     risk_mode = excluded.risk_mode,
                     risk_active = excluded.risk_active,
@@ -142,6 +145,7 @@ class DualEngineStateStore:
                     left_latch_active = excluded.left_latch_active,
                     left_latch_position = excluded.left_latch_position,
                     left_trigger_price = excluded.left_trigger_price,
+                    left_hold_counter = excluded.left_hold_counter,
                     updated_at = excluded.updated_at
                 """,
                 (
@@ -154,6 +158,7 @@ class DualEngineStateStore:
                     int(payload["left_latch_active"]),
                     payload["left_latch_position"],
                     payload["left_trigger_price"],
+                    payload["left_hold_counter"],
                     payload["updated_at"],
                 ),
             )
