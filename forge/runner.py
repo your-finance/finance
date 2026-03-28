@@ -540,12 +540,14 @@ def _capture_immutable_hashes(campaign: dict, campaign_path: Path, paths) -> dic
         paths.champion_path,
         paths.champion_params_path,
     ]
-    for optional_path in (
-        common.FORGE_ROOT / "logs" / "experiments_public.tsv",
-        common.FORGE_ROOT / "logs" / "experiments_private.jsonl",
-    ):
-        if optional_path.exists():
-            tracked.append(optional_path)
+    # Track campaign-specific log files if they exist
+    campaign_id = campaign.get("campaign_id", "")
+    if campaign_id:
+        log_dir = common.FORGE_ROOT / "logs" / campaign_id
+        for log_name in ("experiments_public.tsv", "experiments_private.jsonl"):
+            log_path = log_dir / log_name
+            if log_path.exists():
+                tracked.append(log_path)
     return {path.resolve(): common.hash_file(path.resolve()) for path in tracked}
 
 
