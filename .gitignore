@@ -33,6 +33,7 @@ trading/journal/[0-9]*.md
 
 # Worktrees
 .worktrees/
+forge/logs/
 
 # Environment
 .env
