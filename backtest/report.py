@@ -280,11 +280,12 @@ new Chart(document.getElementById('navChart'), {{
     return html
 
 
-def save_html_report(html: str, config: BacktestConfig) -> Path:
+def save_html_report(html: str, config: BacktestConfig, suffix: str = "") -> Path:
     """保存 HTML 报告到文件"""
     _BACKTEST_DIR.mkdir(parents=True, exist_ok=True)
     date_str = datetime.now().strftime("%Y%m%d")
-    path = _BACKTEST_DIR / f"report_{config.market}_{date_str}.html"
+    tag = f"_{suffix}" if suffix else ""
+    path = _BACKTEST_DIR / f"report_{config.market}_{date_str}{tag}.html"
     path.write_text(html, encoding="utf-8")
     logger.info(f"HTML 报告已保存: {path}")
     return path

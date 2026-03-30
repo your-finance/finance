@@ -11,6 +11,12 @@ import pandas as pd
 logger = logging.getLogger(__name__)
 
 
+def _get_bulk_mcaps(date: str) -> Dict[str, float]:
+    """从 market.db 查询所有 symbol 在 date 的历史市值"""
+    from src.data.market_store import get_store
+    return get_store().get_bulk_market_caps_at(date)
+
+
 class USStocksAdapter:
     """
     美股数据适配器
@@ -25,15 +31,18 @@ class USStocksAdapter:
         self,
         symbols: Optional[List[str]] = None,
         universe: Optional[str] = None,
+        mcap_threshold: Optional[float] = None,
     ):
         """
         Args:
             symbols: 要加载的股票列表。None = 自动发现
             universe: 过滤模式: "pool" (池内 ~147), "extended" (~533), None (all in db)
+            mcap_threshold: 历史市值阈值 (e.g. 10e9)。每次 slice_to_date 时过滤低于阈值的股票
         """
         self._price_cache: Dict[str, pd.DataFrame] = {}
         self._symbols = symbols
         self._universe = universe
+        self._mcap_threshold = mcap_threshold
 
     def load_all(self) -> Dict[str, pd.DataFrame]:
         """
@@ -153,6 +162,31 @@ class USStocksAdapter:
             cut = df[mask]
             if len(cut) >= 70:  # RS 最小数据要求
                 sliced[sym] = cut.reset_index(drop=True)
+
+        # ── universe reconstitution ──
+        if self._mcap_threshold and sliced:
+            mcaps = _get_bulk_mcaps(date)
+
+            # 覆盖率门卫 — 每次 rebalance 都检查
+            has_data = sum(1 for sym in sliced if sym in mcaps)
+            coverage = has_data / len(sliced) if sliced else 0
+            if coverage < 0.9:
+                missing = [sym for sym in sliced if sym not in mcaps]
+                raise ValueError(
+                    f"{date}: reconstitution 覆盖率 {coverage:.1%} < 90% "
+                    f"({has_data}/{len(sliced)}). "
+                    f"缺失 mcap 数据的 symbols: {missing[:20]}..."
+                )
+
+            before = len(sliced)
+            sliced = {
+                sym: df for sym, df in sliced.items()
+                if sym not in mcaps  # 无数据 → 保留（覆盖率门卫已确保 <10%）
+                or mcaps[sym] >= self._mcap_threshold  # 有数据且达标 → 保留
+            }
+            filtered = before - len(sliced)
+            if filtered > 0:
+                logger.debug(f"{date}: reconstitution 过滤 {filtered} 只 (阈值 {self._mcap_threshold:.0e})")
 
         return sliced
 

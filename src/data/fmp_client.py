@@ -140,6 +140,39 @@ class FMPClient:
             return data.get("historical", [])
         return []
 
+    def get_historical_market_cap(
+        self, symbol: str, from_date: str, to_date: str
+    ) -> List[Dict]:
+        """
+        获取历史市值 (日频)
+
+        使用 stable 端点: /stable/historical-market-capitalization?symbol=XXX
+        注意: legacy /api/v3/historical-market-capitalization/XXX 已废弃 (403)
+
+        Args:
+            symbol: 股票代码
+            from_date: 起始日期 YYYY-MM-DD
+            to_date: 结束日期 YYYY-MM-DD
+
+        Returns:
+            [{"symbol": str, "date": str, "market_cap": float}, ...]
+        """
+        data = self._request(
+            "historical-market-capitalization",
+            {"symbol": symbol, "from": from_date, "to": to_date},
+        )
+        if not data:
+            return []
+        return [
+            {
+                "symbol": row.get("symbol", symbol),
+                "date": row["date"],
+                "market_cap": row["marketCap"],
+            }
+            for row in data
+            if "date" in row and "marketCap" in row
+        ]
+
     def get_quote(self, symbol: str) -> Optional[Dict]:
         """获取实时报价"""
         data = self._request("quote", {"symbol": symbol})
