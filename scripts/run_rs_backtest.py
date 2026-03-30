@@ -84,18 +84,20 @@ def run_single(args):
             metrics=metrics,
             config=config,
         )
-        path = save_html_report(html, config)
+        suffix = "reconstituted" if getattr(args, "reconstitute", None) else "original"
+        path = save_html_report(html, config, suffix=suffix)
         print(f"HTML 报告: {path}")
 
     return metrics
 
 
 def _make_adapter(args):
-    """Create adapter with optional universe filter."""
+    """Create adapter with optional universe filter and reconstitution."""
     universe = getattr(args, "universe", None)
-    if universe and args.market == "us_stocks":
+    mcap = getattr(args, "reconstitute", None)
+    if (universe or mcap) and args.market == "us_stocks":
         from backtest.adapters.us_stocks import USStocksAdapter
-        return USStocksAdapter(universe=universe)
+        return USStocksAdapter(universe=universe, mcap_threshold=mcap)
     return None
 
 
@@ -192,6 +194,9 @@ def main():
     parser.add_argument("--optimize", action="store_true", help="优化模式 (sweep + walk-forward)")
     parser.add_argument("--universe", choices=["pool", "extended"],
                         default=None, help="股票池范围: pool (~147) / extended (~533) / 默认=全部")
+    parser.add_argument("--reconstitute", type=float, default=None,
+                        metavar="MCAP",
+                        help="历史市值阈值 (e.g. 10e9)，启用 universe reconstitution")
     parser.add_argument("--html", action="store_true", help="生成 HTML 报告")
     parser.add_argument("-v", "--verbose", action="store_true")
 
