@@ -22,6 +22,7 @@ class BacktestConfig:
     start_date: Optional[str] = None
     end_date: Optional[str] = None
     rebalance_held: bool = True  # True=真等权, False=动量持有(原行为)
+    mcap_threshold: Optional[float] = None  # 历史市值阈值 (e.g. 10e9), None=不过滤
 
     @property
     def cost_rate(self) -> float:
