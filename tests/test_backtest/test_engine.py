@@ -372,6 +372,46 @@ class TestRegimeFilter:
                 f"drift mode 下 to_hold 没被调整"
             )
 
+    def test_regime_recovery_relevers_drift_positions(self):
+        """P1 fix: regime off→on 后 drift 模式重新加仓到目标权重"""
+        adapter = MockAdapter()
+        dates = adapter.get_trading_dates()
+        n = len(dates)
+        third = n // 3
+
+        # Must use trending data so current > SMA (flat = current == SMA → off)
+        # Phase 1 (on): rising 100→200
+        # Phase 2 (off): flat at 30
+        # Phase 3 (recovery): rising 300→400
+        phase1 = [100.0 + (100.0 * i / third) for i in range(third)]
+        phase2 = [30.0] * third
+        phase3 = [300.0 + (100.0 * i / (n - 2 * third)) for i in range(n - 2 * third)]
+        index_vals = phase1 + phase2 + phase3
+        index_series = pd.Series(index_vals, index=dates)
+        adapter.get_index_prices = lambda sym="SPY": index_series
+
+        config = BacktestConfig(
+            market="us_stocks", rs_method="B", top_n=3,
+            rebalance_freq="M", initial_capital=1_000_000,
+            regime_symbol="SPY", regime_ma_period=10,
+            regime_mode="scale", regime_scale_factor=0.5,
+            rebalance_held=False,  # drift mode
+        )
+        engine = BacktestEngine(config, adapter=adapter)
+        engine.run()
+
+        # Regime should have at least 1 switch (off→on recovery)
+        assert engine.regime_stats["n_switches"] >= 1
+
+        # After regime recovery (last third), portfolio should re-lever
+        # Cash should be < 30% (returning toward full investment)
+        final = engine.portfolio.snapshots[-1]
+        cash_pct = final.cash / final.nav if final.nav > 0 else 1
+        assert cash_pct < 0.30, (
+            f"After regime recovery, cash is {cash_pct:.1%} — "
+            f"drift positions were not re-levered"
+        )
+
     def test_regime_disabled_by_default(self):
         """不传 regime_symbol → 行为不变"""
         config = BacktestConfig(
@@ -424,6 +464,28 @@ class TestInvVolEngine:
 
         assert metrics.n_days > 0
         assert metrics.n_trades > 0
+
+    def test_compute_volatilities_with_ndarray(self):
+        """P1 fix: _compute_volatilities 处理 ndarray 数据（crypto 路径）"""
+        config = BacktestConfig(
+            market="crypto", rs_method="B", top_n=3,
+            rebalance_freq="M", initial_capital=1_000_000,
+            weighting="inv_vol", vol_lookback=60,
+        )
+        adapter = MockAdapter()
+        engine = BacktestEngine(config, adapter=adapter)
+
+        # Build ndarray-style sliced data (like CryptoAdapter returns)
+        prices = _generate_prices(n_stocks=3, n_days=200)
+        ndarray_sliced = {
+            sym: df["close"].values.astype(np.float64)
+            for sym, df in prices.items()
+        }
+
+        vols = engine._compute_volatilities(ndarray_sliced, 60)
+        assert len(vols) == 3
+        for vol in vols.values():
+            assert vol > 0
 
     def test_invvol_vs_equal_different_nav(self):
         """inv_vol 和 equal weight 产生不同的 NAV 轨迹"""

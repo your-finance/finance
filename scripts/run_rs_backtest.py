@@ -115,8 +115,21 @@ def _make_adapter(args):
     return None
 
 
+def _warn_unsupported_flags(args, mode: str):
+    """Warn if regime/inv_vol flags are passed with sweep/optimize."""
+    warnings = []
+    if getattr(args, "regime", None):
+        warnings.append(f"--regime {args.regime}")
+    if args.weighting != "equal":
+        warnings.append(f"--weighting {args.weighting}")
+    if warnings:
+        print(f"\n⚠️  {mode} 模式不支持以下参数 (已忽略): {', '.join(warnings)}")
+        print(f"   这些参数仅在单次回测 (不加 --sweep/--optimize) 时生效。\n")
+
+
 def run_sweep(args):
     """参数扫描"""
+    _warn_unsupported_flags(args, "参数扫描")
     sweep = ParameterSweep(args.market)
 
     def progress(current, total, config):
@@ -151,6 +164,7 @@ def run_sweep(args):
 
 def run_optimize(args):
     """完整优化: sweep + 稳健性 + walk-forward"""
+    _warn_unsupported_flags(args, "优化")
     if args.market == "crypto":
         train_months, test_months, step_months = 6, 3, 3
     else:

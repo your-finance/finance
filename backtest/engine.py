@@ -168,6 +168,13 @@ class BacktestEngine:
         # ── Regime check ──
         regime_on = self._check_regime(date)
 
+        # Detect regime recovery (off→on) BEFORE updating state
+        regime_recovery = (
+            regime_on
+            and self._last_regime_state is not None
+            and not self._last_regime_state
+        )
+
         # 统计
         if regime_on:
             self._regime_on_count += 1
@@ -232,11 +239,13 @@ class BacktestEngine:
         # 调整目标持仓权重
         # rebalance_held=True: 所有目标持仓(to_hold+to_buy)回到目标权重
         # rebalance_held=False: 只买入新股，已有持仓保持漂移
-        # P2 fix: regime scale 期间必须调整所有持仓（包括 to_hold），
-        # 否则 drift 模式下已有持仓不会被缩减
+        # Force full rebalance when:
+        # - rebalance_held=True (always re-weight all positions)
+        # - regime_scale_active (scale down held positions)
+        # - regime_recovery (re-lever held positions after regime off→on)
         adjust_symbols = (
             action.to_hold + action.to_buy
-            if self.config.rebalance_held or regime_scale_active
+            if self.config.rebalance_held or regime_scale_active or regime_recovery
             else action.to_buy
         )
 
@@ -315,14 +324,23 @@ class BacktestEngine:
         Returns:
             {symbol: annualized_vol}
         """
+        days_per_year = 365 if self.config.market == "crypto" else 252
         vols: Dict[str, float] = {}
-        for sym, df in sliced.items():
-            if len(df) < lookback + 1:
+        for sym, data in sliced.items():
+            # Handle both DataFrame (us_stocks) and ndarray (crypto)
+            if isinstance(data, pd.DataFrame):
+                if len(data) < lookback + 1:
+                    continue
+                closes = data["close"].astype(float).values[-lookback:]
+            elif isinstance(data, np.ndarray):
+                if len(data) < lookback + 1:
+                    continue
+                closes = data[-lookback:].astype(np.float64)
+            else:
                 continue
-            closes = df["close"].astype(float).values[-lookback:]
             returns = np.diff(closes) / closes[:-1]
             if len(returns) > 1:
-                vols[sym] = float(np.std(returns, ddof=1) * np.sqrt(252))
+                vols[sym] = float(np.std(returns, ddof=1) * np.sqrt(days_per_year))
         return vols
 
     # ── 辅助方法 ──────────────────────────────────────
