@@ -87,6 +87,14 @@ class MockAdapter:
         from src.indicators.rs_rating import compute_rs_rating_b, compute_rs_rating_c
         return compute_rs_rating_b if method == "B" else compute_rs_rating_c
 
+    def get_index_prices(self, symbol="SPY"):
+        """用第一只合成股票做 regime index"""
+        first = list(self._data.values())[0]
+        return pd.Series(
+            first["close"].astype(float).values,
+            index=first["date"].astype(str).values,
+        )
+
     def get_date_range(self):
         dates = self.get_trading_dates()
         return (dates[0], dates[-1]) if dates else ("", "")
@@ -262,3 +270,238 @@ class TestBacktestEngine:
         assert config_eqw.label() != config_drift.label()
         assert "eqw" in config_eqw.label()
         assert "drift" in config_drift.label()
+
+    def test_label_with_regime_and_invvol(self):
+        """label() 包含 regime 和 inv_vol 信息"""
+        config = BacktestConfig(
+            market="us_stocks", rs_method="B", top_n=10,
+            rebalance_freq="M", sell_buffer=5,
+            weighting="inv_vol", vol_lookback=60,
+            regime_symbol="SPY", regime_ma_period=200, regime_mode="cash",
+        )
+        label = config.label()
+        assert "inv_vol60" in label
+        assert "regime200_cash" in label
+
+
+class TestRegimeFilter:
+    """Regime filter 测试"""
+
+    def test_regime_cash_no_holdings_when_off(self):
+        """regime_mode=cash: regime off 期间持仓为零"""
+        adapter = MockAdapter()
+        dates = adapter.get_trading_dates()
+        mid = len(dates) // 2
+
+        # 构造 regime index: 前半高 (on), 后半低 (off)
+        index_vals = [200.0] * mid + [50.0] * (len(dates) - mid)
+        index_series = pd.Series(index_vals, index=dates)
+        adapter.get_index_prices = lambda sym="SPY": index_series
+
+        config = BacktestConfig(
+            market="us_stocks", rs_method="B", top_n=3,
+            rebalance_freq="M", initial_capital=1_000_000,
+            regime_symbol="SPY", regime_ma_period=50,  # 短周期方便测试
+            regime_mode="cash",
+        )
+        engine = BacktestEngine(config, adapter=adapter)
+        metrics = engine.run()
+
+        assert metrics.n_days > 0
+        # 后半段 regime off → 应该有清仓操作
+        late_snapshots = [s for s in engine.portfolio.snapshots
+                         if s.date >= dates[mid + 60]]  # MA 需要回看期
+        if late_snapshots:
+            for snap in late_snapshots[-5:]:
+                assert snap.n_holdings == 0, (
+                    f"{snap.date}: 应该清仓但有 {snap.n_holdings} 只持仓"
+                )
+
+    def test_regime_scale_reduces_exposure(self):
+        """regime_mode=scale: regime off 期间仓位缩减"""
+        adapter = MockAdapter()
+        dates = adapter.get_trading_dates()
+
+        # regime 全程 off (index 远低于 MA)
+        index_series = pd.Series([30.0] * len(dates), index=dates)
+        adapter.get_index_prices = lambda sym="SPY": index_series
+
+        config = BacktestConfig(
+            market="us_stocks", rs_method="B", top_n=3,
+            rebalance_freq="M", initial_capital=1_000_000,
+            regime_symbol="SPY", regime_ma_period=10,
+            regime_mode="scale", regime_scale_factor=0.5,
+        )
+        engine = BacktestEngine(config, adapter=adapter)
+        metrics = engine.run()
+
+        assert metrics.n_days > 0
+        # 应该只用 ~50% 资金
+        late = engine.portfolio.snapshots[-5:]
+        for snap in late:
+            cash_pct = snap.cash / snap.nav if snap.nav > 0 else 0
+            assert cash_pct > 0.3, (
+                f"{snap.date}: scale 0.5 但 cash 只有 {cash_pct:.1%}"
+            )
+
+    def test_regime_scale_with_drift_still_reduces(self):
+        """P2 fix: regime_mode=scale + rebalance_held=False 仍然缩减已有持仓"""
+        adapter = MockAdapter()
+        dates = adapter.get_trading_dates()
+
+        # regime 全程 off
+        index_series = pd.Series([30.0] * len(dates), index=dates)
+        adapter.get_index_prices = lambda sym="SPY": index_series
+
+        config = BacktestConfig(
+            market="us_stocks", rs_method="B", top_n=3,
+            rebalance_freq="M", initial_capital=1_000_000,
+            regime_symbol="SPY", regime_ma_period=10,
+            regime_mode="scale", regime_scale_factor=0.5,
+            rebalance_held=False,  # drift mode — the P2 edge case
+        )
+        engine = BacktestEngine(config, adapter=adapter)
+        metrics = engine.run()
+
+        assert metrics.n_days > 0
+        late = engine.portfolio.snapshots[-5:]
+        for snap in late:
+            cash_pct = snap.cash / snap.nav if snap.nav > 0 else 0
+            assert cash_pct > 0.3, (
+                f"{snap.date}: scale 0.5 但 cash 只有 {cash_pct:.1%}, "
+                f"drift mode 下 to_hold 没被调整"
+            )
+
+    def test_regime_recovery_relevers_drift_positions(self):
+        """P1 fix: regime off→on 后 drift 模式重新加仓到目标权重"""
+        adapter = MockAdapter()
+        dates = adapter.get_trading_dates()
+        n = len(dates)
+        third = n // 3
+
+        # Must use trending data so current > SMA (flat = current == SMA → off)
+        # Phase 1 (on): rising 100→200
+        # Phase 2 (off): flat at 30
+        # Phase 3 (recovery): rising 300→400
+        phase1 = [100.0 + (100.0 * i / third) for i in range(third)]
+        phase2 = [30.0] * third
+        phase3 = [300.0 + (100.0 * i / (n - 2 * third)) for i in range(n - 2 * third)]
+        index_vals = phase1 + phase2 + phase3
+        index_series = pd.Series(index_vals, index=dates)
+        adapter.get_index_prices = lambda sym="SPY": index_series
+
+        config = BacktestConfig(
+            market="us_stocks", rs_method="B", top_n=3,
+            rebalance_freq="M", initial_capital=1_000_000,
+            regime_symbol="SPY", regime_ma_period=10,
+            regime_mode="scale", regime_scale_factor=0.5,
+            rebalance_held=False,  # drift mode
+        )
+        engine = BacktestEngine(config, adapter=adapter)
+        engine.run()
+
+        # Regime should have at least 1 switch (off→on recovery)
+        assert engine.regime_stats["n_switches"] >= 1
+
+        # After regime recovery (last third), portfolio should re-lever
+        # Cash should be < 30% (returning toward full investment)
+        final = engine.portfolio.snapshots[-1]
+        cash_pct = final.cash / final.nav if final.nav > 0 else 1
+        assert cash_pct < 0.30, (
+            f"After regime recovery, cash is {cash_pct:.1%} — "
+            f"drift positions were not re-levered"
+        )
+
+    def test_regime_disabled_by_default(self):
+        """不传 regime_symbol → 行为不变"""
+        config = BacktestConfig(
+            market="us_stocks", rs_method="B", top_n=3,
+            rebalance_freq="M", initial_capital=1_000_000,
+        )
+        adapter = MockAdapter()
+        engine = BacktestEngine(config, adapter=adapter)
+        metrics = engine.run()
+        assert metrics.n_days > 0
+        assert metrics.n_trades > 0
+
+    def test_regime_stats(self):
+        """regime_stats 属性输出正确"""
+        adapter = MockAdapter()
+        dates = adapter.get_trading_dates()
+        mid = len(dates) // 2
+        index_vals = [200.0] * mid + [50.0] * (len(dates) - mid)
+        index_series = pd.Series(index_vals, index=dates)
+        adapter.get_index_prices = lambda sym="SPY": index_series
+
+        config = BacktestConfig(
+            market="us_stocks", rs_method="B", top_n=3,
+            rebalance_freq="M", initial_capital=1_000_000,
+            regime_symbol="SPY", regime_ma_period=50,
+            regime_mode="cash",
+        )
+        engine = BacktestEngine(config, adapter=adapter)
+        engine.run()
+
+        stats = engine.regime_stats
+        assert 0 <= stats["regime_on_pct"] <= 1.0
+        assert stats["n_switches"] >= 0
+        assert stats["n_rebalances_on"] + stats["n_rebalances_off"] > 0
+
+
+class TestInvVolEngine:
+    """Inverse-vol weighting 引擎集成测试"""
+
+    def test_invvol_runs(self):
+        """inv_vol 回测能跑通"""
+        config = BacktestConfig(
+            market="us_stocks", rs_method="B", top_n=3,
+            rebalance_freq="M", initial_capital=1_000_000,
+            weighting="inv_vol", vol_lookback=60,
+        )
+        adapter = MockAdapter()
+        engine = BacktestEngine(config, adapter=adapter)
+        metrics = engine.run()
+
+        assert metrics.n_days > 0
+        assert metrics.n_trades > 0
+
+    def test_compute_volatilities_with_ndarray(self):
+        """P1 fix: _compute_volatilities 处理 ndarray 数据（crypto 路径）"""
+        config = BacktestConfig(
+            market="crypto", rs_method="B", top_n=3,
+            rebalance_freq="M", initial_capital=1_000_000,
+            weighting="inv_vol", vol_lookback=60,
+        )
+        adapter = MockAdapter()
+        engine = BacktestEngine(config, adapter=adapter)
+
+        # Build ndarray-style sliced data (like CryptoAdapter returns)
+        prices = _generate_prices(n_stocks=3, n_days=200)
+        ndarray_sliced = {
+            sym: df["close"].values.astype(np.float64)
+            for sym, df in prices.items()
+        }
+
+        vols = engine._compute_volatilities(ndarray_sliced, 60)
+        assert len(vols) == 3
+        for vol in vols.values():
+            assert vol > 0
+
+    def test_invvol_vs_equal_different_nav(self):
+        """inv_vol 和 equal weight 产生不同的 NAV 轨迹"""
+        common = dict(
+            market="us_stocks", rs_method="B", top_n=3,
+            sell_buffer=1, rebalance_freq="M",
+            initial_capital=1_000_000, transaction_cost_bps=0,
+        )
+
+        config_eq = BacktestConfig(**common, weighting="equal")
+        engine_eq = BacktestEngine(config_eq, adapter=MockAdapter())
+        metrics_eq = engine_eq.run()
+
+        config_iv = BacktestConfig(**common, weighting="inv_vol", vol_lookback=60)
+        engine_iv = BacktestEngine(config_iv, adapter=MockAdapter())
+        metrics_iv = engine_iv.run()
+
+        # NAV 应该不同
+        assert metrics_eq.total_return != metrics_iv.total_return
