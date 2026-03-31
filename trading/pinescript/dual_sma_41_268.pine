@@ -1,0 +1,34 @@
+//@version=6
+strategy("Dual SMA 41/268 | BTC 4H", overlay=true, default_qty_type=strategy.percent_of_equity, default_qty_value=100, initial_capital=10000, commission_type=strategy.commission.percent, commission_value=0.05, slippage=1)
+
+// ─── Inputs ───
+fastLen = input.int(41, "Fast SMA Period", minval=1)
+slowLen = input.int(268, "Slow SMA Period", minval=1)
+
+// ─── Indicators ───
+fastMA = ta.sma(close, fastLen)
+slowMA = ta.sma(close, slowLen)
+
+// ─── Signals ───
+goldenCross = ta.crossover(fastMA, slowMA)
+deathCross  = ta.crossunder(fastMA, slowMA)
+
+// ─── Strategy ───
+if goldenCross
+    strategy.entry("Long", strategy.long)
+
+if deathCross
+    strategy.close("Long")
+
+// ─── Visuals ───
+plot(fastMA, "Fast SMA", color=color.new(#2196F3, 0), linewidth=2)
+plot(slowMA, "Slow SMA", color=color.new(#FF9800, 0), linewidth=2)
+
+bgcolor(strategy.position_size > 0 ? color.new(#2196F3, 90) : na)
+
+plotshape(goldenCross, "Golden Cross", shape.triangleup, location.belowbar, color.new(#4CAF50, 0), size=size.small)
+plotshape(deathCross, "Death Cross", shape.triangledown, location.abovebar, color.new(#F44336, 0), size=size.small)
+
+// ─── Alerts ───
+alertcondition(goldenCross, "SMA Golden Cross", "SMA 41/268 Golden Cross - GO LONG")
+alertcondition(deathCross, "SMA Death Cross", "SMA 41/268 Death Cross - EXIT")

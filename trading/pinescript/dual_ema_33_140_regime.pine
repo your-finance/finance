@@ -1,0 +1,58 @@
+//@version=6
+strategy("Dual EMA 33/140 + Regime | BTC 4H", overlay=true, default_qty_type=strategy.percent_of_equity, default_qty_value=100, initial_capital=10000, commission_type=strategy.commission.percent, commission_value=0.05, slippage=1)
+
+// ─── Inputs ───
+fastLen   = input.int(33, "Fast EMA Period", minval=1)
+slowLen   = input.int(140, "Slow EMA Period", minval=1)
+slopeLen  = input.int(60, "Regime Slope Lookback", minval=1, tooltip="Slow EMA must be rising over this many bars to allow entry")
+
+// ─── Indicators ───
+fastEMA = ta.ema(close, fastLen)
+slowEMA = ta.ema(close, slowLen)
+
+// Regime: slow EMA slope over N bars
+slowSlope = slowEMA - slowEMA[slopeLen]
+regimeOK  = slowSlope > 0
+
+// ─── Signals ───
+bullCross = ta.crossover(fastEMA, slowEMA)
+bearCross = ta.crossunder(fastEMA, slowEMA)
+
+// Entry: golden cross + regime bullish
+// Also enter if already above and regime just turned bullish (re-entry after regime block)
+aboveSlow    = fastEMA > slowEMA
+regimeFlip   = regimeOK and not regimeOK[1]
+entrySignal  = bullCross and regimeOK
+reentrySignal = aboveSlow and regimeFlip and strategy.position_size == 0
+
+// Exit: death cross (unconditional)
+exitSignal = bearCross
+
+// ─── Strategy ───
+if entrySignal or reentrySignal
+    strategy.entry("Long", strategy.long)
+
+if exitSignal
+    strategy.close("Long")
+
+// ─── Visuals ───
+plot(fastEMA, "Fast EMA", color=color.new(#E91E63, 0), linewidth=2)
+plot(slowEMA, "Slow EMA", color=color.new(#FF9800, 0), linewidth=2)
+
+// Regime background
+bgcolor(strategy.position_size > 0 ? color.new(#E91E63, 90) : na)
+bgcolor(not regimeOK and fastEMA > slowEMA ? color.new(#FF9800, 93) : na) // golden cross but regime blocked
+
+plotshape(entrySignal, "Entry", shape.triangleup, location.belowbar, color.new(#4CAF50, 0), size=size.small)
+plotshape(reentrySignal, "Re-entry", shape.triangleup, location.belowbar, color.new(#8BC34A, 0), size=size.tiny)
+plotshape(exitSignal, "Exit", shape.triangledown, location.abovebar, color.new(#F44336, 0), size=size.small)
+
+// Regime indicator
+plotshape(regimeOK and not regimeOK[1], "Regime ON", shape.diamond, location.bottom, color.new(#4CAF50, 30), size=size.tiny)
+plotshape(not regimeOK and regimeOK[1], "Regime OFF", shape.diamond, location.bottom, color.new(#F44336, 30), size=size.tiny)
+
+// ─── Alerts ───
+alertcondition(entrySignal, "EMA Entry", "EMA 33/140 Golden Cross + Regime Bullish - GO LONG")
+alertcondition(reentrySignal, "EMA Re-entry", "EMA 33/140 Regime Flip Bullish - RE-ENTER LONG")
+alertcondition(exitSignal, "EMA Exit", "EMA 33/140 Death Cross - EXIT")
+alertcondition(not regimeOK and fastEMA > slowEMA, "Regime Block", "Golden cross but regime bearish - ENTRY BLOCKED")
