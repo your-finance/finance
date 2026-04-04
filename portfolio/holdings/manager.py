@@ -54,10 +54,28 @@ class PortfolioManager:
 
     def add_position(self, symbol: str, shares: float, avg_cost: float,
                      date: str) -> Position:
-        pid = self._store.insert_holding(symbol, shares=shares, avg_cost=avg_cost,
-                                          open_date=date)
-        self._store.insert_transaction(pid, symbol, "BUY", shares=shares,
-                                        price=avg_cost, date=date)
+        """Add a new position atomically (holding + initial BUY transaction)."""
+        import datetime as dt
+        symbol = symbol.upper()
+        conn = self._store._get_conn()
+        now = dt.datetime.now().isoformat()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            cur = conn.execute(
+                """INSERT INTO holdings (symbol, shares, avg_cost, open_date, status, last_updated)
+                   VALUES (?, ?, ?, ?, 'OPEN', ?)""",
+                (symbol, shares, avg_cost, date, now),
+            )
+            pid = cur.lastrowid
+            conn.execute(
+                """INSERT INTO transactions (position_id, symbol, action, shares, price, date, notes, created_at)
+                   VALUES (?, ?, 'BUY', ?, ?, ?, '', ?)""",
+                (pid, symbol, shares, avg_cost, date, now),
+            )
+            conn.execute("COMMIT")
+        except Exception:
+            conn.execute("ROLLBACK")
+            raise
         return self.get_position(symbol)
 
     def close_position(self, symbol: str, sell_price: float, date: str) -> float:
@@ -97,6 +115,8 @@ class PortfolioManager:
             now = dt.datetime.now().isoformat()
 
             if action in ("BUY", "ADD"):
+                if action == "BUY" and current is not None:
+                    raise ValueError(f"Position already open for {symbol}. Use ADD to add shares.")
                 cost = shares * price
                 if cost > cash:
                     raise ValueError(f"Insufficient cash: need {cost:.2f}, have {cash:.2f}")
@@ -155,15 +175,20 @@ class PortfolioManager:
                 closed = remaining == 0
 
                 if closed:
+                    # Final close: add this trim's P&L to any accumulated from prior trims
+                    total_realized = (current.get("realized_pnl") or 0) + realized
                     conn.execute(
                         """UPDATE holdings SET status = 'CLOSED', close_date = ?,
                            realized_pnl = ?, shares = 0, last_updated = ? WHERE position_id = ?""",
-                        (date, realized, now, pid),
+                        (date, total_realized, now, pid),
                     )
                 else:
+                    # Partial trim: accumulate realized_pnl on open position
                     conn.execute(
-                        "UPDATE holdings SET shares = ?, last_updated = ? WHERE position_id = ?",
-                        (remaining, now, pid),
+                        """UPDATE holdings SET shares = ?,
+                           realized_pnl = COALESCE(realized_pnl, 0) + ?,
+                           last_updated = ? WHERE position_id = ?""",
+                        (remaining, realized, now, pid),
                     )
 
                 new_balance = cash + proceeds

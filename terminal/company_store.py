@@ -202,7 +202,7 @@ class CompanyStore:
 
     def _get_conn(self) -> sqlite3.Connection:
         if self._conn is None:
-            self._conn = sqlite3.connect(str(self.db_path))
+            self._conn = sqlite3.connect(str(self.db_path), isolation_level=None)
             self._conn.row_factory = sqlite3.Row
             self._conn.execute("PRAGMA journal_mode=WAL")
             self._conn.execute("PRAGMA foreign_keys=ON")
@@ -444,7 +444,8 @@ class CompanyStore:
         now = datetime.now().isoformat()
         conn = self._get_conn()
 
-        with conn:
+        try:
+            conn.execute("BEGIN")
             # Mark previous as non-current
             conn.execute(
                 "UPDATE oprms_ratings SET is_current = 0 WHERE symbol = ? AND is_current = 1",
@@ -463,6 +464,10 @@ class CompanyStore:
                  json.dumps(evidence or [], ensure_ascii=False),
                  investment_bucket, verdict, position_pct, now),
             )
+            conn.execute("COMMIT")
+        except Exception:
+            conn.execute("ROLLBACK")
+            raise
         logger.info(
             "Saved OPRMS for %s: DNA=%s Timing=%s Coeff=%.2f",
             symbol, dna, timing, timing_coeff,
@@ -802,7 +807,10 @@ class CompanyStore:
     def checkpoint(self) -> None:
         """Flush WAL journal so raw file copy is consistent."""
         conn = self._get_conn()
-        conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        row = conn.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
+        if row and row[0] != 0:
+            logger.warning("WAL checkpoint incomplete (busy=%d, log=%d, checkpointed=%d)",
+                           row[0], row[1], row[2])
 
     # ---- Kill Conditions ----
 
@@ -820,7 +828,8 @@ class CompanyStore:
         now = datetime.now().isoformat()
         conn = self._get_conn()
 
-        with conn:
+        try:
+            conn.execute("BEGIN")
             # Deactivate existing
             conn.execute(
                 "UPDATE kill_conditions SET is_active = 0 WHERE symbol = ? AND is_active = 1",
@@ -838,6 +847,10 @@ class CompanyStore:
                     """,
                     (symbol, cond["description"], cond.get("source_lens", ""), now),
                 )
+            conn.execute("COMMIT")
+        except Exception:
+            conn.execute("ROLLBACK")
+            raise
         return len(conditions)
 
     def get_kill_conditions(self, symbol: str, active_only: bool = True) -> List[Dict[str, Any]]:
