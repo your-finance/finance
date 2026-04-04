@@ -34,10 +34,16 @@ def is_hk_ticker(symbol: str) -> bool:
 
 
 def to_yfinance_ticker(symbol: str) -> str | None:
-    """Convert HK ticker to yfinance format. Returns None for non-HK."""
+    """Convert HK ticker to yfinance format. Returns None for non-HK.
+
+    HKEX uses 5-digit codes (07709), Yahoo uses 4-digit (7709.HK).
+    4-digit codes like 0700 stay as 0700.HK (not 700.HK).
+    """
     if not is_hk_ticker(symbol):
         return None
-    return f"{int(symbol)}.HK"
+    # Last 4 digits: handles both 5-digit HKEX (07709→7709) and 4-digit (0700→0700)
+    code = symbol[-4:] if len(symbol) >= 4 else symbol
+    return f"{code}.HK"
 
 
 def _yf_download_hk(yf_symbol: str, period: str = "200d") -> pd.DataFrame | None:
@@ -187,23 +193,36 @@ def calc_sector_concentration(positions: list) -> dict:
     return sectors
 
 
+def _date_returns(df: pd.DataFrame) -> pd.Series:
+    """Extract close returns as a string-date-indexed Series.
+
+    Normalizes dates to 'YYYY-MM-DD' strings so Timestamp (yfinance)
+    and string (SQLite) sources align correctly on inner join.
+    """
+    closes = df["close"].astype(float).values
+    if "date" in df.columns:
+        idx = pd.to_datetime(df["date"]).dt.strftime("%Y-%m-%d").values
+    else:
+        idx = range(len(closes))
+    s = pd.Series(closes, index=idx)
+    return s.pct_change().dropna()
+
+
 def calc_qqq_beta(symbols: list, prices_map: dict, qqq_df: pd.DataFrame,
                   weights: dict, lookback: int = 60) -> float | None:
     """等效 QQQ Beta = sum(weight_i * beta_i). Aligns on date column."""
     if qqq_df is None or "close" not in qqq_df.columns:
         return None
-    # Date-indexed QQQ returns
-    qqq = qqq_df.set_index("date")["close"].pct_change().dropna() if "date" in qqq_df.columns else qqq_df["close"].pct_change().dropna()
-    if len(qqq) < 20:
+    qqq_ret = _date_returns(qqq_df)
+    if len(qqq_ret) < 20:
         return None
     total_beta = 0.0
     for sym in symbols:
         df = prices_map.get(sym)
         if df is None:
             continue
-        sym_ret = df.set_index("date")["close"].pct_change().dropna() if "date" in df.columns else df["close"].pct_change().dropna()
-        # Inner join on dates, then take last N
-        aligned = pd.DataFrame({"sym": sym_ret, "qqq": qqq}).dropna().tail(lookback)
+        sym_ret = _date_returns(df)
+        aligned = pd.DataFrame({"sym": sym_ret, "qqq": qqq_ret}).dropna().tail(lookback)
         if len(aligned) < 20:
             continue
         cov = aligned["sym"].cov(aligned["qqq"])
@@ -463,13 +482,24 @@ def run_intelligence(dry_run: bool = False) -> str:
                 )
 
     # ---- 格式化 ----
+    # Option P&L: (live_premium - avg_premium) * quantity * 100
+    option_pnl = 0.0
+    for op in option_positions:
+        key = (op["symbol"], op["expiration"], op["strike"], op["side"])
+        live = option_prices.get(key)
+        if live is not None:
+            option_pnl += (live - op["avg_premium"]) * op["quantity"] * 100
+
+    stock_pnl = sum(p.unrealized_pnl for p in positions_refreshed)
+    total_pnl = stock_pnl + option_pnl
+
     summary = {
         "total_nav": nav,
         "invested_pct": invested / nav if nav > 0 else 0,
         "cash_pct": cash / nav if nav > 0 else 0,
         "qqq_beta": qqq_beta,
-        "total_pnl": sum(p.unrealized_pnl for p in positions_refreshed),
-        "total_pnl_pct": sum(p.unrealized_pnl for p in positions_refreshed) / invested if invested > 0 else 0,
+        "total_pnl": total_pnl,
+        "total_pnl_pct": total_pnl / invested if invested > 0 else 0,
         "sectors": {k: v for k, v in sector_conc.items() if not k.startswith("_")},
         "sector_warnings": sector_conc.get("_warnings", []),
         "total_positions": len(positions_refreshed),

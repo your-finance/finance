@@ -158,6 +158,11 @@ class TestHKTickerMapping:
         assert to_yfinance_ticker("01810") == "1810.HK"
         assert to_yfinance_ticker("09992") == "9992.HK"
 
+    def test_4digit_preserves_leading_zero(self):
+        from scripts.portfolio_intelligence import to_yfinance_ticker
+        assert to_yfinance_ticker("0700") == "0700.HK"
+        assert to_yfinance_ticker("0005") == "0005.HK"
+
     def test_us_ticker_unchanged(self):
         from scripts.portfolio_intelligence import to_yfinance_ticker
         assert to_yfinance_ticker("NVDA") is None
@@ -255,3 +260,16 @@ class TestQQQBetaDateAlignment:
         beta = calc_qqq_beta(["TEST"], {"TEST": sym_df}, qqq_df, {"TEST": 1.0})
         # No overlapping dates → beta should be 0 (no contribution)
         assert beta == 0.0
+
+    def test_timestamp_vs_string_dates_align(self):
+        """P2 fix: HK history has Timestamp dates, SQLite has string dates."""
+        from scripts.portfolio_intelligence import calc_qqq_beta
+        dates = pd.bdate_range(end="2026-04-01", periods=100)
+        np.random.seed(77)
+        # QQQ from SQLite: string dates
+        qqq_df = pd.DataFrame({"date": dates.strftime("%Y-%m-%d"), "close": 500 * np.cumprod(1 + np.random.normal(0.001, 0.01, 100))})
+        # HK from yfinance: Timestamp dates
+        sym_df = pd.DataFrame({"date": dates, "close": 100 * np.cumprod(1 + np.random.normal(0.001, 0.02, 100))})
+        beta = calc_qqq_beta(["HK"], {"HK": sym_df}, qqq_df, {"HK": 1.0}, lookback=60)
+        assert beta is not None
+        assert beta != 0.0
