@@ -216,11 +216,28 @@ class PortfolioManager:
 
     # ---- NAV & Weights ----
 
-    def get_total_nav(self, prices: Dict[str, float]) -> float:
+    def get_option_market_value(self, option_prices: Optional[Dict] = None) -> float:
+        """Sum market value of all open option positions.
+
+        Each contract = 100 shares. value = quantity * premium * 100.
+        option_prices: {(symbol, exp, strike, side): current_premium}
+        Falls back to avg_premium (cost) if no live price available.
+        """
+        positions = self._store.get_open_option_positions()
+        total = 0.0
+        for p in positions:
+            key = (p["symbol"], p["expiration"], p["strike"], p["side"])
+            premium = (option_prices or {}).get(key, p["avg_premium"])
+            total += p["quantity"] * premium * 100
+        return total
+
+    def get_total_nav(self, prices: Dict[str, float],
+                      option_prices: Optional[Dict] = None) -> float:
         holdings = self._store.get_all_open_holdings()
         invested = sum(h["shares"] * prices.get(h["symbol"], 0) for h in holdings)
+        options = self.get_option_market_value(option_prices)
         cash = self._store.get_cash_balance()
-        return invested + cash
+        return invested + options + cash
 
     def refresh_prices(self, prices: Dict[str, float]) -> List[Position]:
         """Load holdings, apply prices, compute weights based on total_NAV."""
@@ -231,27 +248,48 @@ class PortfolioManager:
             p.current_weight = (p.market_value / nav) if nav > 0 else 0
         return positions
 
-    def get_portfolio_summary(self, prices: Dict[str, float]) -> Dict:
+    def get_portfolio_summary(self, prices: Dict[str, float],
+                              option_prices: Optional[Dict] = None) -> Dict:
         positions = self.refresh_prices(prices)
         cash = self._store.get_cash_balance()
-        nav = self.get_total_nav(prices)
-        invested = nav - cash
+        option_mv = self.get_option_market_value(option_prices)
+        nav = self.get_total_nav(prices, option_prices)
+        stock_invested = sum(p.market_value for p in positions)
+        total_invested = stock_invested + option_mv
         total_cost = sum(p.shares * p.cost_basis for p in positions)
-        total_pnl = invested - total_cost
+
+        # Option cost basis
+        opt_positions = self._store.get_open_option_positions()
+        option_cost = sum(p["quantity"] * p["avg_premium"] * 100 for p in opt_positions)
+        total_cost += option_cost
+
+        total_pnl = total_invested - total_cost
         return {
             "total_nav": nav,
-            "total_value": invested,       # legacy field: invested value (no cash)
+            "total_value": total_invested,  # legacy field: invested value (no cash)
             "total_cost": total_cost,       # legacy field: total cost basis
-            "invested_value": invested,
+            "invested_value": total_invested,
+            "stock_value": stock_invested,
+            "option_value": option_mv,
             "cash": cash,
-            "invested_pct": invested / nav if nav > 0 else 0,
+            "invested_pct": total_invested / nav if nav > 0 else 0,
             "cash_pct": cash / nav if nav > 0 else 0,
             "total_positions": len(positions),
+            "option_positions": len(opt_positions),
             "total_pnl": total_pnl,
             "total_pnl_pct": total_pnl / total_cost if total_cost > 0 else 0,
             "by_bucket": _count_by_bucket(positions),
             "by_dna": _count_by_field(positions, "dna_rating"),
             "positions": [p.to_dict() for p in positions],
+            "options": [{
+                "symbol": o["symbol"],
+                "expiration": o["expiration"],
+                "strike": o["strike"],
+                "side": o["side"],
+                "quantity": o["quantity"],
+                "avg_premium": o["avg_premium"],
+                "strategy_tag": o.get("strategy_tag", ""),
+            } for o in opt_positions],
         }
 
     # ---- Enrichment ----

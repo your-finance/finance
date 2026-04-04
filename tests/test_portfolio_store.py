@@ -131,6 +131,69 @@ class TestKillConditionsMigration:
             assert any("Azure" in c.get("description", "") for c in conditions)
 
 
+class TestOptionPositions:
+    def test_insert_and_get(self, store):
+        store.upsert_company("QQQ", company_name="Invesco QQQ Trust")
+        oid = store.insert_option_position(
+            symbol="QQQ", expiration="2026-06-18", strike=580.0, side="PUT",
+            quantity=10, avg_premium=23.605, open_date="2026-04-01",
+        )
+        assert oid > 0
+        pos = store.get_open_option_positions()
+        assert len(pos) == 1
+        assert pos[0]["symbol"] == "QQQ"
+        assert pos[0]["strike"] == 580.0
+        assert pos[0]["quantity"] == 10
+        assert pos[0]["status"] == "OPEN"
+
+    def test_short_position(self, store):
+        """Negative quantity = short."""
+        store.upsert_company("QQQ", company_name="Invesco QQQ Trust")
+        store.insert_option_position(
+            symbol="QQQ", expiration="2026-09-18", strike=410.0, side="PUT",
+            quantity=-10, avg_premium=4.78, open_date="2026-04-01",
+        )
+        pos = store.get_open_option_positions()
+        assert pos[0]["quantity"] == -10
+
+    def test_close_option(self, store):
+        store.upsert_company("QQQ", company_name="Invesco QQQ Trust")
+        oid = store.insert_option_position(
+            symbol="QQQ", expiration="2026-04-17", strike=570.0, side="PUT",
+            quantity=9, avg_premium=6.75, open_date="2026-04-01",
+        )
+        store.close_option_position(oid, close_date="2026-04-15")
+        pos = store.get_open_option_positions()
+        assert len(pos) == 0
+
+    def test_get_by_symbol(self, store):
+        store.upsert_company("QQQ", company_name="Invesco QQQ Trust")
+        store.upsert_company("EWY", company_name="iShares MSCI South Korea ETF")
+        store.insert_option_position(
+            symbol="QQQ", expiration="2026-06-18", strike=580.0, side="PUT",
+            quantity=10, avg_premium=23.605, open_date="2026-04-01",
+        )
+        store.insert_option_position(
+            symbol="EWY", expiration="2026-07-17", strike=160.0, side="CALL",
+            quantity=10, avg_premium=17.61, open_date="2026-04-01",
+        )
+        qqq = store.get_open_option_positions(symbol="QQQ")
+        assert len(qqq) == 1
+        assert qqq[0]["symbol"] == "QQQ"
+        all_pos = store.get_open_option_positions()
+        assert len(all_pos) == 2
+
+    def test_strategy_tag(self, store):
+        store.upsert_company("QQQ", company_name="Invesco QQQ Trust")
+        store.insert_option_position(
+            symbol="QQQ", expiration="2026-06-18", strike=580.0, side="PUT",
+            quantity=10, avg_premium=23.605, open_date="2026-04-01",
+            strategy_tag="tail_hedge",
+        )
+        pos = store.get_open_option_positions()
+        assert pos[0]["strategy_tag"] == "tail_hedge"
+
+
 class TestCheckpoint:
     def test_checkpoint_company_db(self, store):
         """checkpoint should not raise."""

@@ -176,6 +176,25 @@ CREATE TABLE IF NOT EXISTS transactions (
 CREATE INDEX IF NOT EXISTS idx_txn_symbol ON transactions(symbol);
 CREATE INDEX IF NOT EXISTS idx_txn_position ON transactions(position_id);
 
+CREATE TABLE IF NOT EXISTS option_positions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    symbol TEXT NOT NULL,
+    expiration TEXT NOT NULL,
+    strike REAL NOT NULL,
+    side TEXT NOT NULL,
+    quantity INTEGER NOT NULL,
+    avg_premium REAL NOT NULL,
+    open_date TEXT NOT NULL,
+    close_date TEXT,
+    status TEXT NOT NULL DEFAULT 'OPEN',
+    strategy_tag TEXT DEFAULT '',
+    notes TEXT DEFAULT '',
+    last_updated TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_option_pos_symbol ON option_positions(symbol);
+CREATE INDEX IF NOT EXISTS idx_option_pos_status ON option_positions(status);
+
 CREATE TABLE IF NOT EXISTS portfolio_cash (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     action TEXT NOT NULL,
@@ -272,6 +291,24 @@ class CompanyStore:
                 CREATE INDEX IF NOT EXISTS idx_txn_symbol ON transactions(symbol);
                 CREATE INDEX IF NOT EXISTS idx_txn_position ON transactions(position_id);
 
+                CREATE TABLE IF NOT EXISTS option_positions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    symbol TEXT NOT NULL,
+                    expiration TEXT NOT NULL,
+                    strike REAL NOT NULL,
+                    side TEXT NOT NULL,
+                    quantity INTEGER NOT NULL,
+                    avg_premium REAL NOT NULL,
+                    open_date TEXT NOT NULL,
+                    close_date TEXT,
+                    status TEXT NOT NULL DEFAULT 'OPEN',
+                    strategy_tag TEXT DEFAULT '',
+                    notes TEXT DEFAULT '',
+                    last_updated TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_option_pos_symbol ON option_positions(symbol);
+                CREATE INDEX IF NOT EXISTS idx_option_pos_status ON option_positions(status);
+
                 CREATE TABLE IF NOT EXISTS portfolio_cash (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     action TEXT NOT NULL,
@@ -280,6 +317,28 @@ class CompanyStore:
                     notes TEXT DEFAULT '',
                     updated_at TEXT NOT NULL
                 );
+            """)
+
+        # --- Migration 4: option_positions table (for DBs that have holdings but not options) ---
+        if "option_positions" not in tables:
+            conn.executescript("""
+                CREATE TABLE IF NOT EXISTS option_positions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    symbol TEXT NOT NULL,
+                    expiration TEXT NOT NULL,
+                    strike REAL NOT NULL,
+                    side TEXT NOT NULL,
+                    quantity INTEGER NOT NULL,
+                    avg_premium REAL NOT NULL,
+                    open_date TEXT NOT NULL,
+                    close_date TEXT,
+                    status TEXT NOT NULL DEFAULT 'OPEN',
+                    strategy_tag TEXT DEFAULT '',
+                    notes TEXT DEFAULT '',
+                    last_updated TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_option_pos_symbol ON option_positions(symbol);
+                CREATE INDEX IF NOT EXISTS idx_option_pos_status ON option_positions(status);
             """)
 
         conn.commit()
@@ -801,6 +860,45 @@ class CompanyStore:
             "SELECT * FROM portfolio_cash ORDER BY id"
         ).fetchall()
         return [dict(r) for r in rows]
+
+    # ---- Option Positions ----
+
+    def insert_option_position(self, symbol: str, expiration: str, strike: float,
+                                side: str, quantity: int, avg_premium: float,
+                                open_date: str, strategy_tag: str = "",
+                                notes: str = "") -> int:
+        now = datetime.now().isoformat()
+        conn = self._get_conn()
+        cur = conn.execute(
+            """INSERT INTO option_positions
+               (symbol, expiration, strike, side, quantity, avg_premium,
+                open_date, status, strategy_tag, notes, last_updated)
+               VALUES (?, ?, ?, ?, ?, ?, ?, 'OPEN', ?, ?, ?)""",
+            (symbol.upper(), expiration, strike, side.upper(), quantity,
+             avg_premium, open_date, strategy_tag, notes, now),
+        )
+        return cur.lastrowid
+
+    def get_open_option_positions(self, symbol: str = None) -> List[Dict[str, Any]]:
+        conn = self._get_conn()
+        if symbol:
+            rows = conn.execute(
+                "SELECT * FROM option_positions WHERE status = 'OPEN' AND symbol = ? ORDER BY expiration, strike",
+                (symbol.upper(),),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT * FROM option_positions WHERE status = 'OPEN' ORDER BY symbol, expiration, strike"
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def close_option_position(self, position_id: int, close_date: str) -> None:
+        now = datetime.now().isoformat()
+        conn = self._get_conn()
+        conn.execute(
+            "UPDATE option_positions SET status = 'CLOSED', close_date = ?, last_updated = ? WHERE id = ?",
+            (close_date, now, position_id),
+        )
 
     # ---- Checkpoint ----
 

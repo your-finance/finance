@@ -100,6 +100,26 @@ class TestNAV:
         assert summary["cash_pct"] == pytest.approx(500000 / 515000, rel=1e-3)
         assert summary["total_positions"] == 1
 
+    def test_nav_includes_options(self, manager):
+        """Options market value should be part of total_nav."""
+        manager.add_position("NVDA", shares=100, avg_cost=135.0, date="2026-04-01")
+        manager._store.set_cash(100000.0)
+        # Add a long put: 5 contracts @ $10 premium = 5 * 10 * 100 = $5000
+        manager._store.upsert_company("QQQ", company_name="QQQ")
+        manager._store.insert_option_position(
+            symbol="QQQ", expiration="2026-06-18", strike=580.0, side="PUT",
+            quantity=5, avg_premium=10.0, open_date="2026-04-01",
+        )
+        prices = {"NVDA": 150.0}
+        nav = manager.get_total_nav(prices)
+        # stock: 100*150=15000 + option: 5*10*100=5000 + cash: 100000 = 120000
+        assert nav == pytest.approx(120000.0)
+
+        summary = manager.get_portfolio_summary(prices)
+        assert summary["option_value"] == pytest.approx(5000.0)
+        assert summary["option_positions"] == 1
+        assert len(summary["options"]) == 1
+
 
 class TestExecuteTrade:
     def test_buy_new_position(self, manager):
