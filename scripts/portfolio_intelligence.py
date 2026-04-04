@@ -63,21 +63,25 @@ def calc_sector_concentration(positions: list) -> dict:
 
 def calc_qqq_beta(symbols: list, prices_map: dict, qqq_df: pd.DataFrame,
                   weights: dict, lookback: int = 60) -> float | None:
-    """等效 QQQ Beta = sum(weight_i * beta_i)."""
-    if qqq_df is None or len(qqq_df) < lookback:
+    """等效 QQQ Beta = sum(weight_i * beta_i). Aligns on date column."""
+    if qqq_df is None or "close" not in qqq_df.columns:
         return None
-    qqq_ret = qqq_df["close"].pct_change().dropna().tail(lookback)
+    # Date-indexed QQQ returns
+    qqq = qqq_df.set_index("date")["close"].pct_change().dropna() if "date" in qqq_df.columns else qqq_df["close"].pct_change().dropna()
+    if len(qqq) < 20:
+        return None
     total_beta = 0.0
     for sym in symbols:
         df = prices_map.get(sym)
-        if df is None or len(df) < lookback:
+        if df is None:
             continue
-        sym_ret = df["close"].pct_change().dropna().tail(lookback)
-        aligned = pd.concat([sym_ret, qqq_ret], axis=1, join="inner")
+        sym_ret = df.set_index("date")["close"].pct_change().dropna() if "date" in df.columns else df["close"].pct_change().dropna()
+        # Inner join on dates, then take last N
+        aligned = pd.DataFrame({"sym": sym_ret, "qqq": qqq}).dropna().tail(lookback)
         if len(aligned) < 20:
             continue
-        cov = aligned.iloc[:, 0].cov(aligned.iloc[:, 1])
-        var = aligned.iloc[:, 1].var()
+        cov = aligned["sym"].cov(aligned["qqq"])
+        var = aligned["qqq"].var()
         beta = cov / var if var > 0 else 1.0
         total_beta += weights.get(sym, 0) * beta
     return total_beta
@@ -181,8 +185,10 @@ def run_intelligence(dry_run: bool = False) -> str:
     store = get_store()
     mgr = PortfolioManager(store=store)
     positions = mgr.load_holdings()
+    option_positions = store.get_open_option_positions()
+    cash = store.get_cash_balance()
 
-    if not positions:
+    if not positions and not option_positions and cash <= 0:
         msg = "📊 Portfolio Intelligence: 无持仓"
         if not dry_run:
             send_telegram(msg)
@@ -194,6 +200,7 @@ def run_intelligence(dry_run: bool = False) -> str:
     prices_map = {}  # symbol -> DataFrame
     price_latest = {}  # symbol -> float
 
+    no_price_symbols = []
     for p in positions:
         rows = conn.execute(
             "SELECT date, open, high, low, close, volume FROM daily_price "
@@ -206,11 +213,14 @@ def run_intelligence(dry_run: bool = False) -> str:
             df["volume"] = pd.to_numeric(df["volume"])
             prices_map[p.symbol] = df
             price_latest[p.symbol] = df["close"].iloc[-1]
+        elif p.cost_basis > 0:
+            # Fallback: use cost basis so NAV isn't zeroed out
+            price_latest[p.symbol] = p.cost_basis
+            no_price_symbols.append(p.symbol)
     conn.close()
 
     # NAV + weights
     nav = mgr.get_total_nav(price_latest)
-    cash = store.get_cash_balance()
     invested = nav - cash
     positions_refreshed = mgr.refresh_prices(price_latest)
 
@@ -218,6 +228,9 @@ def run_intelligence(dry_run: bool = False) -> str:
 
     # ---- 信号检测 ----
     action_signals = []
+
+    for sym in no_price_symbols:
+        action_signals.append(f"{sym} | 无市场数据，使用成本价估算 ⚠️")
 
     for p in positions_refreshed:
         df = prices_map.get(p.symbol)

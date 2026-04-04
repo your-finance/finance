@@ -149,3 +149,30 @@ class TestFormatReport:
         report = format_report([], summary, {})
         assert "行动信号" not in report
         assert "组合概览" in report
+
+
+class TestQQQBetaDateAlignment:
+    """Fix P2: beta must align on dates, not positional index."""
+
+    def test_different_length_series_align(self):
+        from scripts.portfolio_intelligence import calc_qqq_beta
+        dates_long = pd.bdate_range(end="2026-04-01", periods=200)
+        dates_short = pd.bdate_range(end="2026-04-01", periods=100)
+        np.random.seed(99)
+        qqq_df = pd.DataFrame({"date": dates_long, "close": 500 * np.cumprod(1 + np.random.normal(0.001, 0.01, 200))})
+        sym_df = pd.DataFrame({"date": dates_short, "close": 100 * np.cumprod(1 + np.random.normal(0.001, 0.02, 100))})
+        beta = calc_qqq_beta(["TEST"], {"TEST": sym_df}, qqq_df, {"TEST": 1.0}, lookback=60)
+        # Should NOT be None or 0 — the 100-bar series overlaps with QQQ's last 100 bars
+        assert beta is not None
+        assert beta != 0.0
+
+    def test_no_overlap_returns_none(self):
+        from scripts.portfolio_intelligence import calc_qqq_beta
+        dates_a = pd.bdate_range(start="2025-01-01", periods=60)
+        dates_b = pd.bdate_range(start="2026-01-01", periods=60)
+        np.random.seed(42)
+        qqq_df = pd.DataFrame({"date": dates_a, "close": 500 * np.cumprod(1 + np.random.normal(0, 0.01, 60))})
+        sym_df = pd.DataFrame({"date": dates_b, "close": 100 * np.cumprod(1 + np.random.normal(0, 0.02, 60))})
+        beta = calc_qqq_beta(["TEST"], {"TEST": sym_df}, qqq_df, {"TEST": 1.0})
+        # No overlapping dates → beta should be 0 (no contribution)
+        assert beta == 0.0

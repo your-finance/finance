@@ -22,7 +22,7 @@ user-invocable: true
    mgr = PortfolioManager(store=store)
    position = mgr.get_position(symbol)
    cash = store.get_cash_balance()
-   oprms = store.get_latest_oprms(symbol)
+   oprms = store.get_current_oprms(symbol)
    ```
 
 3. **展示确认摘要**（必须等 Boss 确认才能执行）：
