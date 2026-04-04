@@ -185,7 +185,7 @@ def get_kill_conditions(symbol: str) -> List[dict]:
     d = _COMPANIES_DIR / symbol.upper()
     json_data = _read_json(d / "kill_conditions.json", {})
     json_conditions = json_data.get("conditions", [])
-    json_by_desc = {c.get("description", ""): c for c in json_conditions}
+    json_by_desc = {c.get("description", ""): c for c in json_conditions if isinstance(c, dict)}
 
     if sqlite_rows:
         results = []
