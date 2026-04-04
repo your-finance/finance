@@ -155,6 +155,7 @@ CREATE TABLE IF NOT EXISTS holdings (
     close_date TEXT,
     realized_pnl REAL,
     status TEXT NOT NULL DEFAULT 'OPEN',
+    notes TEXT DEFAULT '',
     last_updated TEXT NOT NULL
 );
 
@@ -272,6 +273,7 @@ class CompanyStore:
                     close_date TEXT,
                     realized_pnl REAL,
                     status TEXT NOT NULL DEFAULT 'OPEN',
+                    notes TEXT DEFAULT '',
                     last_updated TEXT NOT NULL
                 );
                 CREATE UNIQUE INDEX IF NOT EXISTS idx_holdings_open_symbol
@@ -340,6 +342,12 @@ class CompanyStore:
                 CREATE INDEX IF NOT EXISTS idx_option_pos_symbol ON option_positions(symbol);
                 CREATE INDEX IF NOT EXISTS idx_option_pos_status ON option_positions(status);
             """)
+
+        # --- Migration 5: holdings.notes column (for DBs with holdings but no notes col) ---
+        if "holdings" in tables:
+            h_cols = {row[1] for row in conn.execute("PRAGMA table_info(holdings)")}
+            if "notes" not in h_cols:
+                conn.execute("ALTER TABLE holdings ADD COLUMN notes TEXT DEFAULT ''")
 
         conn.commit()
 
@@ -766,7 +774,10 @@ class CompanyStore:
         return [dict(r) for r in rows]
 
     def update_holding(self, position_id: int, **kwargs) -> None:
-        allowed = {"shares", "avg_cost", "last_updated"}
+        allowed = {"shares", "avg_cost", "notes", "last_updated"}
+        dropped = {k for k in kwargs if k not in allowed}
+        if dropped:
+            logger.warning("update_holding: unsupported fields ignored: %s", dropped)
         fields = {k: v for k, v in kwargs.items() if k in allowed}
         if not fields:
             return

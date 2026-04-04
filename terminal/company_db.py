@@ -148,7 +148,8 @@ def save_kill_conditions(symbol: str, conditions: List[dict]) -> None:
 
     Each condition: {description, metric, threshold, status}
     """
-    # SQLite (SSOT)
+    # SQLite (SSOT) — store description + source_lens
+    # Full structured fields (metric, threshold, etc.) preserved in JSON backup
     try:
         store = _get_store()
         store_conditions = []
@@ -172,21 +173,37 @@ def save_kill_conditions(symbol: str, conditions: List[dict]) -> None:
 
 
 def get_kill_conditions(symbol: str) -> List[dict]:
-    """Get active kill conditions — SQLite-first, JSON fallback."""
+    """Get active kill conditions — SQLite-first, enriched with JSON structured fields."""
+    sqlite_rows = []
     try:
         store = _get_store()
-        rows = store.get_kill_conditions(symbol.upper(), active_only=True)
-        if rows:
-            return [{"description": r["description"],
-                     "source_lens": r.get("source_lens", ""),
-                     "status": "active"} for r in rows]
+        sqlite_rows = store.get_kill_conditions(symbol.upper(), active_only=True)
     except Exception:
         pass
 
-    # JSON fallback
+    # JSON has full structured fields (metric, threshold, etc.)
     d = _COMPANIES_DIR / symbol.upper()
-    data = _read_json(d / "kill_conditions.json", {})
-    return data.get("conditions", [])
+    json_data = _read_json(d / "kill_conditions.json", {})
+    json_conditions = json_data.get("conditions", [])
+    json_by_desc = {c.get("description", ""): c for c in json_conditions}
+
+    if sqlite_rows:
+        results = []
+        for r in sqlite_rows:
+            desc = r["description"]
+            base = {"description": desc,
+                    "source_lens": r.get("source_lens", ""),
+                    "status": "active"}
+            # Merge structured fields from JSON if available
+            if desc in json_by_desc:
+                for k in ("metric", "threshold"):
+                    if k in json_by_desc[desc]:
+                        base[k] = json_by_desc[desc][k]
+            results.append(base)
+        return results
+
+    # Pure JSON fallback
+    return json_conditions
 
 
 # ---------------------------------------------------------------------------

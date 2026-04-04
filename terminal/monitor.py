@@ -88,33 +88,32 @@ def run_full_monitor() -> dict:
         logger.error(f"Failed to load holdings: {e}")
         return {"error": f"Failed to load holdings: {e}"}
 
-    if not positions:
-        report.position_count = 0
-        # Still report cash in total_nav for pure-cash portfolios
-        try:
-            from portfolio.holdings.manager import PortfolioManager
-            mgr = PortfolioManager()
-            report.total_nav = mgr._store.get_cash_balance()
-        except Exception:
-            pass
-        return report.to_dict()
-
-    # Refresh prices
-    try:
-        positions = refresh_prices(positions)
-    except Exception as e:
-        logger.warning(f"Price refresh failed: {e}")
-
-    report.position_count = len(positions)
-    report.total_value = sum(p.market_value for p in positions)
-
-    # Compute total_nav (invested + cash)
+    # Always compute NAV components (stock + options + cash)
     try:
         from portfolio.holdings.manager import PortfolioManager
         mgr = PortfolioManager()
-        report.total_nav = report.total_value + mgr._store.get_cash_balance()
+        cash = mgr._store.get_cash_balance()
+        option_mv = mgr.get_option_market_value()
     except Exception:
-        report.total_nav = report.total_value  # fallback: no cash info
+        mgr = None
+        cash = 0.0
+        option_mv = 0.0
+
+    if not positions and option_mv == 0:
+        report.position_count = 0
+        report.total_nav = cash
+        return report.to_dict()
+
+    # Refresh prices
+    if positions:
+        try:
+            positions = refresh_prices(positions)
+        except Exception as e:
+            logger.warning(f"Price refresh failed: {e}")
+
+    report.position_count = len(positions)
+    report.total_value = sum(p.market_value for p in positions)
+    report.total_nav = report.total_value + option_mv + cash
 
     # 2. Run exposure alerts
     try:

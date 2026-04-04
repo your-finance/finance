@@ -15,20 +15,11 @@ from terminal.company_store import get_store
 # ============================================================
 # Boss: 编辑此处后运行
 # ============================================================
-INITIAL_CASH = 750000  # 现金余额 (USD)
+INITIAL_CASH = 0.0  # 现金余额 (USD)
 
 INITIAL_HOLDINGS = [
-    {"symbol": "AMZN", "shares": 400, "avg_cost": 229.02, "date": "2026-01-01"},
-    {"symbol": "ASML", "shares": 87, "avg_cost": 1202.03, "date": "2026-01-01"},
-    {"symbol": "GOOG", "shares": 200, "avg_cost": 304.4, "date": "2026-01-01"},
-    {"symbol": "META", "shares": 130, "avg_cost": 662.66, "date": "2026-01-01"},
-    {"symbol": "MSFT", "shares": 200, "avg_cost": 384.8, "date": "2026-01-01"},
-    {"symbol": "NVDA", "shares": 600, "avg_cost": 176.09, "date": "2026-01-01"},
-    {"symbol": "TSM", "shares": 340, "avg_cost": 267.84, "date": "2026-01-01"},
-    {"symbol": "MU", "shares": 200, "avg_cost": 318.88, "date": "2026-04-01"},
-    {"symbol": "TSLA", "shares": 160, "avg_cost": 433.44, "date": "2026-01-01"},
-    {"symbol": "PDD", "shares": 1500, "avg_cost": 105.24, "date": "2026-01-01"},
-    {"symbol": "DXYZ", "shares": 1758, "avg_cost": 27.41, "date": "2026-04-01"},
+    # {"symbol": "NVDA", "shares": 100, "avg_cost": 135.00, "date": "2026-01-15"},
+    # {"symbol": "AAPL", "shares": 200, "avg_cost": 198.50, "date": "2025-11-20"},
 ]
 # ============================================================
 

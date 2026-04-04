@@ -105,17 +105,34 @@ def generate_weekly_snapshot(positions: Optional[List[Position]] = None) -> str:
         return "# Weekly Snapshot\n\nNo positions in portfolio."
 
     today = datetime.now().strftime("%Y-%m-%d")
-    total_value = sum(p.market_value for p in positions)
-    total_cost = sum(p.shares * p.cost_basis for p in positions)
+    stock_value = sum(p.market_value for p in positions)
+    stock_cost = sum(p.shares * p.cost_basis for p in positions)
+
+    # Include option positions in totals
+    option_mv = 0.0
+    option_cost = 0.0
+    option_count = 0
+    try:
+        from portfolio.holdings.manager import PortfolioManager
+        mgr = PortfolioManager()
+        option_mv = mgr.get_option_market_value()
+        opts = mgr._store.get_open_option_positions()
+        option_cost = sum(o["quantity"] * o["avg_premium"] * 100 for o in opts)
+        option_count = len(opts)
+    except Exception:
+        pass
+
+    total_value = stock_value + option_mv
+    total_cost = stock_cost + option_cost
     total_pnl = total_value - total_cost
     total_pnl_pct = total_pnl / total_cost if total_cost > 0 else 0
 
     lines = []
     lines.append(f"# Weekly Snapshot ({today})")
     lines.append("")
-    lines.append(f"**Portfolio Value**: ${total_value:,.0f}")
+    lines.append(f"**Portfolio Value**: ${total_value:,.0f} (stocks ${stock_value:,.0f} + options ${option_mv:,.0f})")
     lines.append(f"**Total P&L**: ${total_pnl:,.0f} ({total_pnl_pct*100:+.1f}%)")
-    lines.append(f"**Positions**: {len(positions)}")
+    lines.append(f"**Positions**: {len(positions)} stocks + {option_count} option legs")
     lines.append("")
 
     # Top positions by weight
@@ -166,7 +183,14 @@ def generate_monthly_review(
         return "# Monthly Review\n\nNo positions in portfolio."
 
     today = datetime.now().strftime("%Y-%m-%d")
-    total_value = sum(p.market_value for p in positions)
+    stock_value = sum(p.market_value for p in positions)
+    option_mv = 0.0
+    try:
+        from portfolio.holdings.manager import PortfolioManager
+        option_mv = PortfolioManager().get_option_market_value()
+    except Exception:
+        pass
+    total_value = stock_value + option_mv
 
     lines = []
     lines.append(f"# Monthly Review ({today})")
@@ -254,8 +278,19 @@ def generate_quarterly_review(
         return "# Quarterly Review\n\nNo positions in portfolio."
 
     today = datetime.now().strftime("%Y-%m-%d")
-    total_value = sum(p.market_value for p in positions)
-    total_cost = sum(p.shares * p.cost_basis for p in positions)
+    stock_value = sum(p.market_value for p in positions)
+    option_mv = 0.0
+    option_cost = 0.0
+    try:
+        from portfolio.holdings.manager import PortfolioManager
+        mgr = PortfolioManager()
+        option_mv = mgr.get_option_market_value()
+        opts = mgr._store.get_open_option_positions()
+        option_cost = sum(o["quantity"] * o["avg_premium"] * 100 for o in opts)
+    except Exception:
+        pass
+    total_value = stock_value + option_mv
+    total_cost = sum(p.shares * p.cost_basis for p in positions) + option_cost
 
     lines = []
     lines.append(f"# Quarterly Review ({today})")

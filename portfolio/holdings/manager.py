@@ -239,10 +239,11 @@ class PortfolioManager:
         cash = self._store.get_cash_balance()
         return invested + options + cash
 
-    def refresh_prices(self, prices: Dict[str, float]) -> List[Position]:
-        """Load holdings, apply prices, compute weights based on total_NAV."""
+    def refresh_prices(self, prices: Dict[str, float],
+                       option_prices: Optional[Dict] = None) -> List[Position]:
+        """Load holdings, apply prices, compute weights based on total_NAV (incl options)."""
         positions = self.load_holdings()
-        nav = self.get_total_nav(prices)
+        nav = self.get_total_nav(prices, option_prices)
         for p in positions:
             p.current_price = prices.get(p.symbol, 0)
             p.current_weight = (p.market_value / nav) if nav > 0 else 0

@@ -185,10 +185,12 @@ def portfolio_status() -> Dict[str, Any]:
         mgr = PortfolioManager()
         positions = mgr.load_holdings()
 
-        # Always check cash — pure cash portfolio is valid
+        # Always check cash + options — either can exist without stock holdings
         cash = mgr._store.get_cash_balance()
+        option_positions = mgr._store.get_open_option_positions()
+        has_anything = bool(positions) or bool(option_positions)
 
-        if positions:
+        if has_anything:
             result["has_holdings"] = True
 
             # Fetch latest prices — get_price_df returns descending, iloc[0] = newest
@@ -204,19 +206,20 @@ def portfolio_status() -> Dict[str, Any]:
             summary = mgr.get_portfolio_summary(prices)
             result["summary"] = summary
 
-            # Run exposure alerts
-            try:
-                from portfolio.exposure.alerts import run_all_checks
-                refreshed = mgr.refresh_prices(prices)
-                alerts = run_all_checks(refreshed)
-                result["alerts"] = [a.to_dict() for a in alerts]
-                result["alert_counts"] = {
-                    "CRITICAL": sum(1 for a in alerts if a.level.value == "CRITICAL"),
-                    "WARNING": sum(1 for a in alerts if a.level.value == "WARNING"),
-                    "INFO": sum(1 for a in alerts if a.level.value == "INFO"),
-                }
-            except Exception as e:
-                result["alerts_error"] = str(e)
+            # Run exposure alerts (stock positions only)
+            if positions:
+                try:
+                    from portfolio.exposure.alerts import run_all_checks
+                    refreshed = mgr.refresh_prices(prices)
+                    alerts = run_all_checks(refreshed)
+                    result["alerts"] = [a.to_dict() for a in alerts]
+                    result["alert_counts"] = {
+                        "CRITICAL": sum(1 for a in alerts if a.level.value == "CRITICAL"),
+                        "WARNING": sum(1 for a in alerts if a.level.value == "WARNING"),
+                        "INFO": sum(1 for a in alerts if a.level.value == "INFO"),
+                    }
+                except Exception as e:
+                    result["alerts_error"] = str(e)
         else:
             result["summary"] = {
                 "total_positions": 0,
