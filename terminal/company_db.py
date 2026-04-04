@@ -136,12 +136,32 @@ def get_oprms_history(symbol: str) -> List[dict]:
 # Kill conditions
 # ---------------------------------------------------------------------------
 
+def _get_store():
+    """Get CompanyStore singleton for SQLite access."""
+    from terminal.company_store import get_store
+    return get_store()
+
+
 def save_kill_conditions(symbol: str, conditions: List[dict]) -> None:
     """
-    Save active kill conditions.
+    Save active kill conditions — SQLite-first, JSON backup.
 
     Each condition: {description, metric, threshold, status}
     """
+    # SQLite (SSOT)
+    try:
+        store = _get_store()
+        store_conditions = []
+        for c in conditions:
+            store_conditions.append({
+                "description": c.get("description", ""),
+                "source_lens": c.get("source_lens", c.get("metric", "")),
+            })
+        store.save_kill_conditions(symbol, store_conditions)
+    except Exception:
+        pass  # SQLite failure should not block JSON write
+
+    # JSON (backup / legacy)
     d = get_company_dir(symbol)
     data = {
         "symbol": symbol.upper(),
@@ -152,7 +172,18 @@ def save_kill_conditions(symbol: str, conditions: List[dict]) -> None:
 
 
 def get_kill_conditions(symbol: str) -> List[dict]:
-    """Get active kill conditions for a ticker."""
+    """Get active kill conditions — SQLite-first, JSON fallback."""
+    try:
+        store = _get_store()
+        rows = store.get_kill_conditions(symbol.upper(), active_only=True)
+        if rows:
+            return [{"description": r["description"],
+                     "source_lens": r.get("source_lens", ""),
+                     "status": "active"} for r in rows]
+    except Exception:
+        pass
+
+    # JSON fallback
     d = _COMPANIES_DIR / symbol.upper()
     data = _read_json(d / "kill_conditions.json", {})
     return data.get("conditions", [])
