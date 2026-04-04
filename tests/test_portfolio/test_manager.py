@@ -99,3 +99,60 @@ class TestNAV:
         assert summary["invested_pct"] == pytest.approx(15000 / 515000, rel=1e-3)
         assert summary["cash_pct"] == pytest.approx(500000 / 515000, rel=1e-3)
         assert summary["total_positions"] == 1
+
+
+class TestExecuteTrade:
+    def test_buy_new_position(self, manager):
+        manager._store.set_cash(500000.0)
+        result = manager.execute_trade("NVDA", "BUY", shares=100, price=135.0, date="2026-04-01")
+        assert result["action"] == "BUY"
+        assert result["new_shares"] == 100
+        assert result["new_avg_cost"] == 135.0
+        p = manager.get_position("NVDA")
+        assert p.shares == 100
+        assert manager._store.get_cash_balance() == pytest.approx(500000 - 100 * 135)
+
+    def test_add_to_existing(self, manager):
+        manager._store.set_cash(500000.0)
+        manager.execute_trade("NVDA", "BUY", shares=100, price=135.0, date="2026-04-01")
+        manager.execute_trade("NVDA", "ADD", shares=50, price=140.0, date="2026-04-03")
+        p = manager.get_position("NVDA")
+        assert p.shares == 150
+        # avg_cost = (100*135 + 50*140) / 150 = 136.67
+        assert p.cost_basis == pytest.approx((100 * 135 + 50 * 140) / 150, rel=1e-2)
+        assert manager._store.get_cash_balance() == pytest.approx(500000 - 100 * 135 - 50 * 140)
+
+    def test_trim(self, manager):
+        manager._store.set_cash(500000.0)
+        manager.execute_trade("NVDA", "BUY", shares=100, price=135.0, date="2026-04-01")
+        manager.execute_trade("NVDA", "TRIM", shares=30, price=150.0, date="2026-04-05")
+        p = manager.get_position("NVDA")
+        assert p.shares == 70
+        assert manager._store.get_cash_balance() == pytest.approx(500000 - 100 * 135 + 30 * 150)
+
+    def test_sell_all_closes_position(self, manager):
+        manager._store.set_cash(500000.0)
+        manager.execute_trade("NVDA", "BUY", shares=100, price=135.0, date="2026-04-01")
+        result = manager.execute_trade("NVDA", "SELL", shares=100, price=150.0, date="2026-04-05")
+        assert result["closed"] is True
+        assert result["realized_pnl"] == pytest.approx(1500.0)
+        assert manager.get_position("NVDA") is None
+        assert manager._store.get_cash_balance() == pytest.approx(500000 - 13500 + 15000)
+
+    def test_atomic_rollback(self, manager):
+        """If cash goes negative, entire trade should rollback."""
+        manager._store.set_cash(1000.0)  # Not enough for 100 @ 135
+        with pytest.raises(ValueError, match="Insufficient cash"):
+            manager.execute_trade("NVDA", "BUY", shares=100, price=135.0, date="2026-04-01")
+        # Nothing changed
+        assert manager.get_position("NVDA") is None
+        assert manager._store.get_cash_balance() == pytest.approx(1000.0)
+
+    def test_transactions_logged(self, manager):
+        manager._store.set_cash(500000.0)
+        manager.execute_trade("NVDA", "BUY", shares=100, price=135.0, date="2026-04-01")
+        manager.execute_trade("NVDA", "ADD", shares=50, price=140.0, date="2026-04-03")
+        txns = manager._store.get_transactions("NVDA")
+        assert len(txns) == 2
+        assert txns[0]["action"] == "BUY"
+        assert txns[1]["action"] == "ADD"

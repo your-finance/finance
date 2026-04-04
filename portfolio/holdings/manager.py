@@ -71,6 +71,117 @@ class PortfolioManager:
         self._store.close_holding(pid, close_date=date, realized_pnl=realized)
         return realized
 
+    # ---- Atomic Trade ----
+
+    def execute_trade(self, symbol: str, action: str, shares: float,
+                      price: float, date: str, notes: str = "") -> Dict:
+        """
+        Execute a trade as a single atomic transaction.
+        Actions: BUY (new), ADD (to existing), TRIM, SELL (full close).
+        Writes holdings + transactions + cash in one SQLite transaction.
+        Raises ValueError if insufficient cash or invalid state.
+        """
+        import datetime as dt
+        symbol = symbol.upper()
+        conn = self._store._get_conn()
+
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+
+            current = conn.execute(
+                "SELECT * FROM holdings WHERE symbol = ? AND status = 'OPEN'",
+                (symbol,),
+            ).fetchone()
+            current = dict(current) if current else None
+            cash = self._store.get_cash_balance()
+            now = dt.datetime.now().isoformat()
+
+            if action in ("BUY", "ADD"):
+                cost = shares * price
+                if cost > cash:
+                    raise ValueError(f"Insufficient cash: need {cost:.2f}, have {cash:.2f}")
+
+                if current is None:
+                    cur = conn.execute(
+                        """INSERT INTO holdings (symbol, shares, avg_cost, open_date, status, last_updated)
+                           VALUES (?, ?, ?, ?, 'OPEN', ?)""",
+                        (symbol, shares, price, date, now),
+                    )
+                    pid = cur.lastrowid
+                    new_shares, new_avg = shares, price
+                else:
+                    pid = current["position_id"]
+                    old_shares, old_avg = current["shares"], current["avg_cost"]
+                    new_shares = old_shares + shares
+                    new_avg = (old_shares * old_avg + shares * price) / new_shares
+                    conn.execute(
+                        "UPDATE holdings SET shares = ?, avg_cost = ?, last_updated = ? WHERE position_id = ?",
+                        (new_shares, new_avg, now, pid),
+                    )
+
+                conn.execute(
+                    """INSERT INTO transactions (position_id, symbol, action, shares, price, date, notes, created_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (pid, symbol, action, shares, price, date, notes, now),
+                )
+                new_balance = cash - cost
+                conn.execute(
+                    """INSERT INTO portfolio_cash (action, amount, balance_after, notes, updated_at)
+                       VALUES ('WITHDRAW', ?, ?, ?, ?)""",
+                    (-cost, new_balance, f"{action} {symbol} {shares}@{price}", now),
+                )
+                conn.commit()
+                return {"action": action, "new_shares": new_shares, "new_avg_cost": new_avg, "closed": False}
+
+            elif action in ("TRIM", "SELL"):
+                if current is None:
+                    raise ValueError(f"No open position for {symbol}")
+                pid = current["position_id"]
+                old_shares = current["shares"]
+
+                if shares > old_shares:
+                    raise ValueError(f"Cannot sell {shares}, only hold {old_shares}")
+
+                proceeds = shares * price
+                realized = (price - current["avg_cost"]) * shares
+
+                conn.execute(
+                    """INSERT INTO transactions (position_id, symbol, action, shares, price, date, notes, created_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (pid, symbol, action, shares, price, date, notes, now),
+                )
+
+                remaining = old_shares - shares
+                closed = remaining == 0
+
+                if closed:
+                    conn.execute(
+                        """UPDATE holdings SET status = 'CLOSED', close_date = ?,
+                           realized_pnl = ?, shares = 0, last_updated = ? WHERE position_id = ?""",
+                        (date, realized, now, pid),
+                    )
+                else:
+                    conn.execute(
+                        "UPDATE holdings SET shares = ?, last_updated = ? WHERE position_id = ?",
+                        (remaining, now, pid),
+                    )
+
+                new_balance = cash + proceeds
+                conn.execute(
+                    """INSERT INTO portfolio_cash (action, amount, balance_after, notes, updated_at)
+                       VALUES ('DEPOSIT', ?, ?, ?, ?)""",
+                    (proceeds, new_balance, f"{action} {symbol} {shares}@{price}", now),
+                )
+                conn.commit()
+                return {"action": action, "remaining_shares": remaining, "realized_pnl": realized, "closed": closed}
+
+            else:
+                raise ValueError(f"Unknown action: {action}")
+
+        except Exception:
+            conn.rollback()
+            raise
+
     # ---- NAV & Weights ----
 
     def get_total_nav(self, prices: Dict[str, float]) -> float:
