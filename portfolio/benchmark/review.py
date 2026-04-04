@@ -349,19 +349,20 @@ def generate_quarterly_review(
         lines.append("**Quarterly Question**: Should this position be maintained, added to, trimmed, or closed?")
         lines.append("")
 
-    # Diversification
-    analyzer = ExposureAnalyzer(positions)
-    corr_info = analyzer.correlation_adjusted_exposure()
-    lines.append("## Diversification Assessment")
-    lines.append("")
-    lines.append(f"- Actual positions: {corr_info['actual_positions']}")
-    lines.append(f"- Effective positions (correlation-adjusted): {corr_info['effective_positions']}")
-    lines.append(f"- Diversification ratio: {corr_info['diversification_ratio']*100:.1f}%")
-    lines.append(f"- HHI: {corr_info['hhi']:.4f}")
-    lines.append("")
+    # Diversification (stock positions only)
+    if positions:
+        analyzer = ExposureAnalyzer(positions)
+        corr_info = analyzer.correlation_adjusted_exposure()
+        lines.append("## Diversification Assessment")
+        lines.append("")
+        lines.append(f"- Actual positions: {len(positions)}")
+        lines.append(f"- Effective positions (correlation-adjusted): {corr_info.get('effective_positions', 0)}")
+        lines.append(f"- Diversification ratio: {corr_info.get('diversification_ratio', 0)*100:.1f}%")
+        lines.append(f"- HHI: {corr_info.get('hhi', 0):.4f}")
+        lines.append("")
 
     # Alerts
-    alerts = run_all_checks(positions)
+    alerts = run_all_checks(positions) if positions else []
     if alerts:
         lines.append("## Outstanding Alerts")
         lines.append("")
