@@ -22,6 +22,132 @@ logger = logging.getLogger(__name__)
 # ---- DNA 浮亏阈值 ----
 DNA_LOSS_THRESHOLDS = {"S": -0.30, "A": -0.20, "B": -0.15, "C": -0.10}
 
+# ---- HK / USD 汇率 ----
+USD_HKD_RATE = 7.8366
+
+
+# ---- HK ticker helpers ----
+
+def is_hk_ticker(symbol: str) -> bool:
+    """Check if symbol is a HK stock (all-digit, typically 4-5 digits)."""
+    return symbol.isdigit()
+
+
+def to_yfinance_ticker(symbol: str) -> str | None:
+    """Convert HK ticker to yfinance format. Returns None for non-HK."""
+    if not is_hk_ticker(symbol):
+        return None
+    return f"{int(symbol)}.HK"
+
+
+def _yf_download_hk(yf_symbol: str, period: str = "200d") -> pd.DataFrame | None:
+    """Fetch HK price history via yfinance. Returns DataFrame or None."""
+    try:
+        import yfinance as yf
+        import time
+        time.sleep(1)  # yfinance rate limit
+        data = yf.download(yf_symbol, period=period, progress=False, timeout=15)
+        if data is not None and not data.empty:
+            return data
+    except Exception as e:
+        logger.warning("[yfinance] Failed to fetch %s: %s", yf_symbol, e)
+    return None
+
+
+def fetch_hk_prices(hk_symbols: list) -> dict:
+    """Fetch latest prices for HK tickers. Returns {symbol: price_usd}."""
+    result = {}
+    for sym in hk_symbols:
+        yf_ticker = to_yfinance_ticker(sym)
+        if not yf_ticker:
+            continue
+        data = _yf_download_hk(yf_ticker)
+        if data is not None and len(data) > 0:
+            close_col = "Close"
+            if hasattr(data.columns, "get_level_values"):
+                # MultiIndex columns from yf.download
+                close_col = ("Close", yf_ticker) if ("Close", yf_ticker) in data.columns else "Close"
+            hkd_price = float(data[close_col].iloc[-1])
+            result[sym] = hkd_price / USD_HKD_RATE
+            logger.info("[yfinance] %s (%s): HKD %.2f → USD %.4f", sym, yf_ticker, hkd_price, result[sym])
+    return result
+
+
+def fetch_hk_price_history(hk_symbols: list) -> dict:
+    """Fetch price history DataFrames for HK tickers. Returns {symbol: DataFrame}."""
+    result = {}
+    for sym in hk_symbols:
+        yf_ticker = to_yfinance_ticker(sym)
+        if not yf_ticker:
+            continue
+        data = _yf_download_hk(yf_ticker)
+        if data is not None and len(data) > 0:
+            close_col = "Close"
+            volume_col = "Volume"
+            if hasattr(data.columns, "get_level_values"):
+                close_col = ("Close", yf_ticker) if ("Close", yf_ticker) in data.columns else "Close"
+                volume_col = ("Volume", yf_ticker) if ("Volume", yf_ticker) in data.columns else "Volume"
+            df = pd.DataFrame({
+                "date": data.index,
+                "close": pd.to_numeric(data[close_col]) / USD_HKD_RATE,
+                "volume": pd.to_numeric(data[volume_col]),
+            }).reset_index(drop=True)
+            # Add OHLC columns for indicator compatibility
+            df["open"] = df["close"] * 0.999
+            df["high"] = df["close"] * 1.001
+            df["low"] = df["close"] * 0.999
+            result[sym] = df
+    return result
+
+
+# ---- Option price helpers ----
+
+def _yf_option_mid(symbol: str, expiration: str, strike: float, side: str) -> float | None:
+    """Fetch mid price for a specific option contract via yfinance."""
+    try:
+        import yfinance as yf
+        import time
+        time.sleep(1)
+        ticker = yf.Ticker(symbol)
+        chain = ticker.option_chain(expiration)
+        df = chain.puts if side.upper() == "PUT" else chain.calls
+        # Find closest strike
+        matches = df[df["strike"] == strike]
+        if matches.empty:
+            # Try nearest
+            idx = (df["strike"] - strike).abs().idxmin()
+            matches = df.loc[[idx]]
+        if not matches.empty:
+            row = matches.iloc[0]
+            bid = float(row.get("bid", 0) or 0)
+            ask = float(row.get("ask", 0) or 0)
+            if bid > 0 and ask > 0:
+                return (bid + ask) / 2
+            last = float(row.get("lastPrice", 0) or 0)
+            if last > 0:
+                return last
+    except Exception as e:
+        logger.warning("[yfinance] Option fetch failed %s %s %s %.0f: %s", symbol, expiration, side, strike, e)
+    return None
+
+
+def fetch_option_prices(positions: list) -> dict:
+    """Fetch live mid prices for open option positions.
+
+    Returns {(symbol, expiration, strike, side): mid_premium}.
+    Only includes entries where a live price was found.
+    """
+    result = {}
+    # Group by (symbol, expiration) to minimize API calls
+    seen_chains = {}
+    for p in positions:
+        key = (p["symbol"], p["expiration"], p["strike"], p["side"])
+        mid = _yf_option_mid(p["symbol"], p["expiration"], p["strike"], p["side"])
+        if mid is not None:
+            result[key] = mid
+            logger.info("[yfinance] Option %s %s %s %.0f: mid $%.2f", p["symbol"], p["expiration"], p["side"], p["strike"], mid)
+    return result
+
 
 # ---- 信号检测函数 ----
 
@@ -201,6 +327,8 @@ def run_intelligence(dry_run: bool = False) -> str:
     price_latest = {}  # symbol -> float
 
     no_price_symbols = []
+    hk_symbols = [p.symbol for p in positions if is_hk_ticker(p.symbol)]
+
     for p in positions:
         rows = conn.execute(
             "SELECT date, open, high, low, close, volume FROM daily_price "
@@ -213,16 +341,35 @@ def run_intelligence(dry_run: bool = False) -> str:
             df["volume"] = pd.to_numeric(df["volume"])
             prices_map[p.symbol] = df
             price_latest[p.symbol] = df["close"].iloc[-1]
-        elif p.cost_basis > 0:
-            # Fallback: use cost basis so NAV isn't zeroed out
-            price_latest[p.symbol] = p.cost_basis
-            no_price_symbols.append(p.symbol)
     conn.close()
 
-    # NAV + weights
-    nav = mgr.get_total_nav(price_latest)
+    # Fetch HK prices via yfinance (not in market.db)
+    if hk_symbols:
+        logger.info("Fetching HK prices for %s...", hk_symbols)
+        hk_prices = fetch_hk_prices(hk_symbols)
+        hk_history = fetch_hk_price_history(hk_symbols)
+        for sym, usd_price in hk_prices.items():
+            price_latest[sym] = usd_price
+        for sym, df in hk_history.items():
+            prices_map[sym] = df
+
+    # Mark symbols with no price at all
+    for p in positions:
+        if p.symbol not in price_latest and p.cost_basis > 0:
+            price_latest[p.symbol] = p.cost_basis
+            no_price_symbols.append(p.symbol)
+
+    # Fetch option live prices via yfinance
+    option_prices = {}
+    if option_positions:
+        logger.info("Fetching option prices for %d legs...", len(option_positions))
+        option_prices = fetch_option_prices(option_positions)
+        logger.info("Got live prices for %d/%d option legs", len(option_prices), len(option_positions))
+
+    # NAV + weights (now with HK + option prices)
+    nav = mgr.get_total_nav(price_latest, option_prices)
     invested = nav - cash
-    positions_refreshed = mgr.refresh_prices(price_latest)
+    positions_refreshed = mgr.refresh_prices(price_latest, option_prices)
 
     weights = {p.symbol: p.current_weight for p in positions_refreshed}
 

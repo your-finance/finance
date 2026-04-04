@@ -151,6 +151,85 @@ class TestFormatReport:
         assert "组合概览" in report
 
 
+class TestHKTickerMapping:
+    def test_to_yfinance_format(self):
+        from scripts.portfolio_intelligence import to_yfinance_ticker
+        assert to_yfinance_ticker("07709") == "7709.HK"
+        assert to_yfinance_ticker("01810") == "1810.HK"
+        assert to_yfinance_ticker("09992") == "9992.HK"
+
+    def test_us_ticker_unchanged(self):
+        from scripts.portfolio_intelligence import to_yfinance_ticker
+        assert to_yfinance_ticker("NVDA") is None
+        assert to_yfinance_ticker("AAPL") is None
+
+    def test_is_hk_ticker(self):
+        from scripts.portfolio_intelligence import is_hk_ticker
+        assert is_hk_ticker("07709") is True
+        assert is_hk_ticker("01810") is True
+        assert is_hk_ticker("NVDA") is False
+
+
+class TestFetchHKPrices:
+    def test_returns_dict_with_prices(self, monkeypatch):
+        """Mock yfinance to verify fetch_hk_prices returns correct structure."""
+        from scripts.portfolio_intelligence import fetch_hk_prices
+        import scripts.portfolio_intelligence as mod
+
+        fake_data = pd.DataFrame({
+            "Close": [30.0, 31.0, 32.0],
+            "Volume": [1e6, 2e6, 3e6],
+            "Open": [29.5, 30.5, 31.5],
+            "High": [30.5, 31.5, 32.5],
+            "Low": [29.0, 30.0, 31.0],
+        }, index=pd.date_range("2026-04-01", periods=3))
+
+        class FakeTicker:
+            def __init__(self, symbol):
+                self.symbol = symbol
+            @property
+            def history(self_inner):
+                return lambda period, **kw: fake_data
+
+        # Patch yfinance.Ticker
+        monkeypatch.setattr(mod, "_yf_download_hk", lambda sym, period="200d": fake_data)
+        result = fetch_hk_prices(["07709"])
+        assert "07709" in result
+        assert result["07709"] == pytest.approx(32.0 / 7.8366, rel=1e-2)
+
+
+class TestFetchOptionPrices:
+    def test_returns_keyed_dict(self, monkeypatch):
+        from scripts.portfolio_intelligence import fetch_option_prices
+        import scripts.portfolio_intelligence as mod
+
+        positions = [
+            {"symbol": "QQQ", "expiration": "2026-06-18", "strike": 570.0,
+             "side": "PUT", "quantity": 9, "avg_premium": 6.75},
+        ]
+        # Mock: return a mid price
+        monkeypatch.setattr(mod, "_yf_option_mid",
+                            lambda sym, exp, strike, side: 8.50)
+        result = fetch_option_prices(positions)
+        key = ("QQQ", "2026-06-18", 570.0, "PUT")
+        assert key in result
+        assert result[key] == pytest.approx(8.50)
+
+    def test_fallback_on_failure(self, monkeypatch):
+        from scripts.portfolio_intelligence import fetch_option_prices
+        import scripts.portfolio_intelligence as mod
+
+        positions = [
+            {"symbol": "QQQ", "expiration": "2026-06-18", "strike": 570.0,
+             "side": "PUT", "quantity": 9, "avg_premium": 6.75},
+        ]
+        monkeypatch.setattr(mod, "_yf_option_mid",
+                            lambda sym, exp, strike, side: None)
+        result = fetch_option_prices(positions)
+        # No entry → manager falls back to avg_premium
+        assert len(result) == 0
+
+
 class TestQQQBetaDateAlignment:
     """Fix P2: beta must align on dates, not positional index."""
 
