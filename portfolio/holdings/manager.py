@@ -251,7 +251,7 @@ class PortfolioManager:
 
     def get_portfolio_summary(self, prices: Dict[str, float],
                               option_prices: Optional[Dict] = None) -> Dict:
-        positions = self.refresh_prices(prices)
+        positions = self.refresh_prices(prices, option_prices)
         cash = self._store.get_cash_balance()
         option_mv = self.get_option_market_value(option_prices)
         nav = self.get_total_nav(prices, option_prices)
@@ -305,9 +305,11 @@ class PortfolioManager:
         timing = oprms.get("timing", "")
         target_weight = calculate_target_weight(dna, timing) if dna and timing else 0.0
 
-        # last_review_date = latest analysis date for this symbol
-        latest_analysis = self._store.get_latest_analysis(symbol)
-        last_review = latest_analysis.get("analysis_date", "") if latest_analysis else ""
+        # last_review_date: DB manual override > latest analysis date
+        db_review = row.get("last_review_date", "")
+        if not db_review:
+            latest_analysis = self._store.get_latest_analysis(symbol)
+            db_review = latest_analysis.get("analysis_date", "") if latest_analysis else ""
 
         return Position(
             symbol=symbol,
@@ -321,7 +323,8 @@ class PortfolioManager:
             shares=row["shares"],
             entry_date=row["open_date"],
             target_weight=target_weight,
-            last_review_date=last_review,
+            last_review_date=db_review,
+            notes=row.get("notes", ""),
             kill_conditions=[c["description"] for c in kc],
             position_id=row["position_id"],
             status=row["status"],

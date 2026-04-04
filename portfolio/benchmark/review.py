@@ -101,14 +101,7 @@ def generate_weekly_snapshot(positions: Optional[List[Position]] = None) -> str:
     if positions is None:
         positions = refresh_prices(load_holdings())
 
-    if not positions:
-        return "# Weekly Snapshot\n\nNo positions in portfolio."
-
-    today = datetime.now().strftime("%Y-%m-%d")
-    stock_value = sum(p.market_value for p in positions)
-    stock_cost = sum(p.shares * p.cost_basis for p in positions)
-
-    # Include option positions in totals
+    # Check for option positions too — option-only book is valid
     option_mv = 0.0
     option_cost = 0.0
     option_count = 0
@@ -121,6 +114,13 @@ def generate_weekly_snapshot(positions: Optional[List[Position]] = None) -> str:
         option_count = len(opts)
     except Exception:
         pass
+
+    if not positions and option_count == 0:
+        return "# Weekly Snapshot\n\nNo positions in portfolio."
+
+    today = datetime.now().strftime("%Y-%m-%d")
+    stock_value = sum(p.market_value for p in positions)
+    stock_cost = sum(p.shares * p.cost_basis for p in positions)
 
     total_value = stock_value + option_mv
     total_cost = stock_cost + option_cost
@@ -179,17 +179,18 @@ def generate_monthly_review(
     if positions is None:
         positions = refresh_prices(load_holdings())
 
-    if not positions:
-        return "# Monthly Review\n\nNo positions in portfolio."
-
-    today = datetime.now().strftime("%Y-%m-%d")
-    stock_value = sum(p.market_value for p in positions)
     option_mv = 0.0
     try:
         from portfolio.holdings.manager import PortfolioManager
         option_mv = PortfolioManager().get_option_market_value()
     except Exception:
         pass
+
+    if not positions and option_mv == 0:
+        return "# Monthly Review\n\nNo positions in portfolio."
+
+    today = datetime.now().strftime("%Y-%m-%d")
+    stock_value = sum(p.market_value for p in positions)
     total_value = stock_value + option_mv
 
     lines = []
@@ -274,11 +275,6 @@ def generate_quarterly_review(
     if positions is None:
         positions = refresh_prices(load_holdings())
 
-    if not positions:
-        return "# Quarterly Review\n\nNo positions in portfolio."
-
-    today = datetime.now().strftime("%Y-%m-%d")
-    stock_value = sum(p.market_value for p in positions)
     option_mv = 0.0
     option_cost = 0.0
     try:
@@ -289,6 +285,12 @@ def generate_quarterly_review(
         option_cost = sum(o["quantity"] * o["avg_premium"] * 100 for o in opts)
     except Exception:
         pass
+
+    if not positions and option_mv == 0:
+        return "# Quarterly Review\n\nNo positions in portfolio."
+
+    today = datetime.now().strftime("%Y-%m-%d")
+    stock_value = sum(p.market_value for p in positions)
     total_value = stock_value + option_mv
     total_cost = sum(p.shares * p.cost_basis for p in positions) + option_cost
 

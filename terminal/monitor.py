@@ -112,8 +112,8 @@ def run_full_monitor() -> dict:
             logger.warning(f"Price refresh failed: {e}")
 
     report.position_count = len(positions)
-    report.total_value = sum(p.market_value for p in positions)
-    report.total_nav = report.total_value + option_mv + cash
+    report.total_value = sum(p.market_value for p in positions) + option_mv
+    report.total_nav = report.total_value + cash
 
     # 2. Run exposure alerts
     try:
