@@ -185,6 +185,9 @@ def portfolio_status() -> Dict[str, Any]:
         mgr = PortfolioManager()
         positions = mgr.load_holdings()
 
+        # Always check cash — pure cash portfolio is valid
+        cash = mgr._store.get_cash_balance()
+
         if positions:
             result["has_holdings"] = True
 
@@ -215,7 +218,14 @@ def portfolio_status() -> Dict[str, Any]:
             except Exception as e:
                 result["alerts_error"] = str(e)
         else:
-            result["summary"] = {"total_positions": 0, "message": "No holdings found."}
+            result["summary"] = {
+                "total_positions": 0,
+                "total_nav": cash,
+                "cash": cash,
+                "cash_pct": 1.0 if cash > 0 else 0,
+                "invested_pct": 0,
+                "message": "No holdings — cash only." if cash > 0 else "No holdings found.",
+            }
     except Exception as e:
         result["error"] = f"Failed to load holdings: {e}"
 

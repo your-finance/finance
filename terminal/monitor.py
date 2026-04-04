@@ -90,6 +90,13 @@ def run_full_monitor() -> dict:
 
     if not positions:
         report.position_count = 0
+        # Still report cash in total_nav for pure-cash portfolios
+        try:
+            from portfolio.holdings.manager import PortfolioManager
+            mgr = PortfolioManager()
+            report.total_nav = mgr._store.get_cash_balance()
+        except Exception:
+            pass
         return report.to_dict()
 
     # Refresh prices

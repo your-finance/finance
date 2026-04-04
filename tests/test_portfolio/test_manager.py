@@ -148,6 +148,30 @@ class TestExecuteTrade:
         assert manager.get_position("NVDA") is None
         assert manager._store.get_cash_balance() == pytest.approx(1000.0)
 
+    def test_trim_then_sell_cumulative_pnl(self, manager):
+        """BUY 100@100 -> TRIM 40@120 -> SELL 60@130: cumulative = 800 + 1800 = 2600."""
+        manager._store.set_cash(500000.0)
+        manager.execute_trade("NVDA", "BUY", shares=100, price=100.0, date="2026-04-01")
+
+        # TRIM 40 @ 120: this_leg = (120-100)*40 = 800
+        trim_result = manager.execute_trade("NVDA", "TRIM", shares=40, price=120.0, date="2026-04-05")
+        assert trim_result["this_leg_pnl"] == pytest.approx(800.0)
+        assert trim_result["realized_pnl"] == pytest.approx(800.0)  # cumulative so far
+        assert trim_result["closed"] is False
+
+        # SELL remaining 60 @ 130: this_leg = (130-100)*60 = 1800, cumulative = 800+1800 = 2600
+        sell_result = manager.execute_trade("NVDA", "SELL", shares=60, price=130.0, date="2026-04-10")
+        assert sell_result["this_leg_pnl"] == pytest.approx(1800.0)
+        assert sell_result["realized_pnl"] == pytest.approx(2600.0)  # total across all legs
+        assert sell_result["closed"] is True
+
+    def test_buy_rejects_existing_open(self, manager):
+        """BUY should reject if position already open — use ADD instead."""
+        manager._store.set_cash(500000.0)
+        manager.execute_trade("NVDA", "BUY", shares=100, price=135.0, date="2026-04-01")
+        with pytest.raises(ValueError, match="already open"):
+            manager.execute_trade("NVDA", "BUY", shares=50, price=140.0, date="2026-04-02")
+
     def test_transactions_logged(self, manager):
         manager._store.set_cash(500000.0)
         manager.execute_trade("NVDA", "BUY", shares=100, price=135.0, date="2026-04-01")

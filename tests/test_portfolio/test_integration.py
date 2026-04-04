@@ -112,6 +112,51 @@ class TestMonitorContract:
         assert "summary" in result
 
 
+class TestPureCashPortfolio:
+    """Pure cash portfolio (no positions) should still report total_nav."""
+
+    def test_status_shows_cash_only(self):
+        import tempfile
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as tmp:
+            db = Path(tmp) / "test.db"
+            s = CompanyStore(db_path=db)
+            s.set_cash(123456.0)
+
+            with patch("terminal.company_store.get_store", return_value=s), \
+                 patch("terminal.commands.list_all_companies", return_value=[]), \
+                 patch("terminal.freshness.check_all_freshness", return_value=[]):
+                from portfolio.holdings import manager as hm
+                hm._default_mgr = None
+
+                from terminal.commands import portfolio_status
+                result = portfolio_status()
+
+            assert result["has_holdings"] is False
+            assert result["summary"]["total_nav"] == pytest.approx(123456.0)
+            assert result["summary"]["cash"] == pytest.approx(123456.0)
+            s.close()
+
+    def test_monitor_reports_cash_nav(self):
+        import tempfile
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as tmp:
+            db = Path(tmp) / "test.db"
+            s = CompanyStore(db_path=db)
+            s.set_cash(123456.0)
+
+            with patch("terminal.company_store.get_store", return_value=s):
+                from portfolio.holdings import manager as hm
+                hm._default_mgr = None
+
+                from terminal.monitor import run_full_monitor
+                result = run_full_monitor()
+
+            assert result["position_count"] == 0
+            assert result["total_nav"] == pytest.approx(123456.0)
+            s.close()
+
+
 class TestNAVConsistency:
     def test_summary_and_refresh_agree_on_weights(self, store):
         """portfolio_summary and refresh_prices weights must match."""

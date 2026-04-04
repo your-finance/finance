@@ -948,7 +948,8 @@ class CompanyStore:
         conn = self._get_conn()
 
         count = 0
-        with conn:
+        try:
+            conn.execute("BEGIN")
             for c in contracts:
                 conn.execute(
                     """
@@ -991,6 +992,10 @@ class CompanyStore:
                     ),
                 )
                 count += 1
+            conn.execute("COMMIT")
+        except Exception:
+            conn.execute("ROLLBACK")
+            raise
         logger.info(
             "Saved %d option contracts for %s (%s)", count, symbol, snapshot_date
         )

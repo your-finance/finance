@@ -198,7 +198,14 @@ class PortfolioManager:
                     (proceeds, new_balance, f"{action} {symbol} {shares}@{price}", now),
                 )
                 conn.commit()
-                return {"action": action, "remaining_shares": remaining, "realized_pnl": realized, "closed": closed}
+                cumulative_pnl = (current.get("realized_pnl") or 0) + realized
+                return {
+                    "action": action,
+                    "remaining_shares": remaining,
+                    "realized_pnl": cumulative_pnl,  # total across all trims + this leg
+                    "this_leg_pnl": realized,         # this transaction only
+                    "closed": closed,
+                }
 
             else:
                 raise ValueError(f"Unknown action: {action}")
@@ -255,16 +262,27 @@ class PortfolioManager:
         oprms = self._store.get_current_oprms(symbol) or {}
         kc = self._store.get_kill_conditions(symbol, active_only=True)
 
+        dna = oprms.get("dna", "")
+        timing = oprms.get("timing", "")
+        target_weight = calculate_target_weight(dna, timing) if dna and timing else 0.0
+
+        # last_review_date = latest analysis date for this symbol
+        latest_analysis = self._store.get_latest_analysis(symbol)
+        last_review = latest_analysis.get("analysis_date", "") if latest_analysis else ""
+
         return Position(
             symbol=symbol,
             company_name=company.get("company_name", ""),
             sector=company.get("sector", ""),
             industry=company.get("industry", ""),
-            dna_rating=oprms.get("dna", ""),
-            timing_rating=oprms.get("timing", ""),
+            dna_rating=dna,
+            timing_rating=timing,
+            investment_bucket=oprms.get("investment_bucket", InvestmentBucket.COMPOUNDER.value),
             cost_basis=row["avg_cost"],
             shares=row["shares"],
             entry_date=row["open_date"],
+            target_weight=target_weight,
+            last_review_date=last_review,
             kill_conditions=[c["description"] for c in kc],
             position_id=row["position_id"],
             status=row["status"],
