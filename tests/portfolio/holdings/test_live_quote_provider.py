@@ -1,7 +1,11 @@
+import pytest
 from unittest.mock import MagicMock
 
 from portfolio.holdings.live_quote_provider import (
+    OPTION_QUOTE_HARD_CAP,
+    STOCK_QUOTE_HARD_CAP,
     QuoteResult,
+    _pick_price,
     fetch_option_live_quotes,
     fetch_stock_live_quotes,
 )
@@ -54,6 +58,34 @@ def test_stock_quote_exception_caught():
 
     assert result.prices == {}
     assert result.failed == ["AAPL"]
+
+
+def test_pick_price_ignores_zero_mid_and_last():
+    price, price_field = _pick_price({"mid": 0.0, "last": 0.0, "bid": 1.0, "ask": 1.2})
+
+    assert price == pytest.approx(1.1)
+    assert price_field == "bbo_mid"
+
+
+def test_stock_quote_non_ok_status_records_failure():
+    mock_client = MagicMock()
+    mock_client.get_stock_quote_with_meta.return_value = {
+        "quote": {"mid": 100.0},
+        "raw": {"s": "error"},
+        "headers": {},
+    }
+
+    result = fetch_stock_live_quotes(["AAPL"], client=mock_client)
+
+    assert result.prices == {}
+    assert result.failed == ["AAPL"]
+
+
+def test_stock_quote_hard_cap_fails_fast():
+    symbols = [f"S{i}" for i in range(STOCK_QUOTE_HARD_CAP + 1)]
+
+    with pytest.raises(RuntimeError, match="exceeds hard cap"):
+        fetch_stock_live_quotes(symbols, client=MagicMock())
 
 
 def test_option_quote_success():
@@ -110,3 +142,18 @@ def test_option_quote_invalid_occ_caught():
     assert result.prices == {}
     assert len(result.failed) == 1
     mock_client.get_options_quote_with_meta.assert_not_called()
+
+
+def test_option_quote_hard_cap_fails_fast():
+    positions = [
+        {
+            "symbol": f"AAPL{i}",
+            "expiration": "2026-03-21",
+            "strike": 200.0,
+            "side": "CALL",
+        }
+        for i in range(OPTION_QUOTE_HARD_CAP + 1)
+    ]
+
+    with pytest.raises(RuntimeError, match="exceeds hard cap"):
+        fetch_option_live_quotes(positions, client=MagicMock())

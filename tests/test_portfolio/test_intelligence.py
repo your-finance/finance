@@ -180,7 +180,25 @@ class TestFormatReport:
             {},
             snapshot_line="📍 NAV 快照 ET 2026-04-22 10:05 | credit header unavailable",
         )
+        assert "credit header unavailable" in report
         assert "delay ~" not in report
+
+    def test_require_cloud_env_rejects_non_cloud_without_override(self, monkeypatch):
+        from scripts.portfolio_intelligence import require_cloud_env
+
+        monkeypatch.delenv("FINANCE_ENV", raising=False)
+
+        with pytest.raises(RuntimeError, match="FINANCE_ENV=cloud"):
+            require_cloud_env()
+
+    def test_require_cloud_env_allows_explicit_override(self, monkeypatch, caplog):
+        from scripts.portfolio_intelligence import require_cloud_env
+
+        monkeypatch.setenv("FINANCE_ENV", "local")
+
+        require_cloud_env(allow_local=True)
+
+        assert "proceeding because local override was requested" in caplog.text
 
 
 class TestHKTickerMapping:

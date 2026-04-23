@@ -226,7 +226,7 @@ class MarketDataClient:
     def get_options_quote_with_meta(self, option_symbol: str) -> Optional[Dict[str, Any]]:
         """Get normalized option quote plus raw payload and response headers."""
         data, headers = self._request_with_meta("options/quotes/{}".format(option_symbol))
-        if not data or not isinstance(data, dict):
+        if not data or not isinstance(data, dict) or data.get("s") != "ok":
             return None
         quote = _extract_first_values(data, ["mid", "last", "bid", "ask"])
         return {"quote": quote, "raw": data, "headers": headers}

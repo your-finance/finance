@@ -279,3 +279,13 @@ class TestOptionQuote:
         }
         assert result["raw"]["s"] == "ok"
         assert result["headers"]["X-Api-Cost"] == "1"
+
+    @patch("src.data.marketdata_client.requests.get")
+    def test_get_options_quote_with_meta_requires_ok_status(self, mock_get, client, mock_response):
+        resp = mock_response(200, {"s": "no_data", "mid": [1.0]})
+        resp.headers = {"X-Api-Cost": "1"}
+        mock_get.return_value = resp
+
+        result = client.get_options_quote_with_meta("AAPL260321C00200000")
+
+        assert result is None

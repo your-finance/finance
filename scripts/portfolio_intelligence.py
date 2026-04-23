@@ -4,6 +4,7 @@
 每日 22:00 SGT cron 运行，推送持仓级信号到 Telegram。
 三区块报告：行动信号 / 组合概览 / Kill Conditions。
 """
+import os
 import sys
 import logging
 from pathlib import Path
@@ -26,6 +27,23 @@ DNA_LOSS_THRESHOLDS = {"S": -0.30, "A": -0.20, "B": -0.15, "C": -0.10}
 
 # ---- HK / USD 汇率 ----
 USD_HKD_RATE = 7.8366
+
+
+def require_cloud_env(allow_local: bool = False) -> None:
+    """Guard MarketData live quotes behind the cloud runtime."""
+    finance_env = os.environ.get("FINANCE_ENV")
+    if finance_env == "cloud":
+        return
+
+    message = (
+        "Portfolio Intelligence live quotes require FINANCE_ENV=cloud "
+        f"(got {finance_env or 'unset'}) to avoid burning MarketData credits "
+        "from a non-whitelisted IP"
+    )
+    if allow_local:
+        logger.warning("%s; proceeding because local override was requested", message)
+        return
+    raise RuntimeError(message + ". Re-run with --allow-local only for explicit local testing.")
 
 
 # ---- HK ticker helpers ----
@@ -273,7 +291,7 @@ def format_report(
 
 # ---- 主流程 ----
 
-def run_intelligence(dry_run: bool = False) -> str:
+def run_intelligence(dry_run: bool = False, allow_local: bool = False) -> str:
     """运行完整 Intelligence 管道, 返回格式化报告."""
     import sqlite3
     from portfolio.holdings.manager import PortfolioManager
@@ -323,6 +341,9 @@ def run_intelligence(dry_run: bool = False) -> str:
             signals_as_of = latest_date
 
     us_symbols = [p.symbol for p in positions if not is_hk_ticker(p.symbol)]
+    if us_symbols or option_positions:
+        require_cloud_env(allow_local=allow_local)
+
     stock_live_result = QuoteResult()
     if us_symbols:
         stock_live_result = fetch_stock_live_quotes(us_symbols)
@@ -524,8 +545,8 @@ def run_intelligence(dry_run: bool = False) -> str:
         snapshot_line += f" | ⚠️ fallback: {','.join(fallback_symbols)}"
     if option_positions:
         snapshot_line += f" | opt {len(option_prices)}/{len(option_positions)}"
-    if option_live_result.failed:
-        snapshot_line += f" | ⚠️ opt_fail: {len(option_live_result.failed)}"
+        if option_live_result.failed:
+            snapshot_line += f" (⚠️ fail {len(option_live_result.failed)})"
 
     credit_fragments = []
     if stock_live_result.request_count > 0:
@@ -554,8 +575,13 @@ if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser(description="Portfolio Intelligence")
     parser.add_argument("--dry-run", action="store_true", help="Print report without sending Telegram")
+    parser.add_argument(
+        "--allow-local",
+        action="store_true",
+        help="Explicitly allow local runs outside FINANCE_ENV=cloud",
+    )
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO)
-    report = run_intelligence(dry_run=args.dry_run)
+    report = run_intelligence(dry_run=args.dry_run, allow_local=args.allow_local)
     print(report)

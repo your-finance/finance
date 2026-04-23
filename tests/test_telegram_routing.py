@@ -226,9 +226,10 @@ class TestPortfolioRouting:
             credits_remaining=None,
         )
 
-        result = portfolio_intelligence.run_intelligence(dry_run=False)
+        result = portfolio_intelligence.run_intelligence(dry_run=False, allow_local=True)
 
         assert "组合概览" in result
         assert "NAV 快照 ET" in result
+        assert "credit header unavailable" in result
         mock_deliver.assert_called_once()
         assert mock_deliver.call_args.kwargs["dry_run"] is False

@@ -35,3 +35,8 @@ def test_invalid_side():
 def test_invalid_date():
     with pytest.raises(ValueError):
         build_occ_symbol("AAPL", "not-a-date", 200.0, "CALL")
+
+
+def test_empty_symbol():
+    with pytest.raises(ValueError, match="non-empty"):
+        build_occ_symbol("   ", "2026-03-21", 200.0, "CALL")

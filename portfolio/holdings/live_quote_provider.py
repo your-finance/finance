@@ -10,6 +10,9 @@ from terminal.options.occ_symbol import build_occ_symbol
 
 logger = logging.getLogger(__name__)
 
+STOCK_QUOTE_HARD_CAP = 50
+OPTION_QUOTE_HARD_CAP = 50
+
 
 def _extract_credit_headers(headers: Dict[str, Any]) -> Tuple[Optional[str], Optional[str]]:
     normalized = {str(k).lower(): str(v) for k, v in headers.items()}
@@ -45,13 +48,15 @@ class QuoteResult:
 
 
 def _pick_price(quote: Dict[str, Any]) -> Tuple[Optional[float], Optional[str]]:
-    if quote.get("mid") is not None:
-        return float(quote["mid"]), "mid"
-    if quote.get("last") is not None:
-        return float(quote["last"]), "last"
+    mid = quote.get("mid")
+    if mid is not None and float(mid) > 0:
+        return float(mid), "mid"
+    last = quote.get("last")
+    if last is not None and float(last) > 0:
+        return float(last), "last"
     bid = quote.get("bid")
     ask = quote.get("ask")
-    if bid is not None and ask is not None:
+    if bid is not None and ask is not None and (float(bid) > 0 or float(ask) > 0):
         return (float(bid) + float(ask)) / 2, "bbo_mid"
     return None, None
 
@@ -61,6 +66,12 @@ def fetch_stock_live_quotes(symbols: List[str], client=None) -> QuoteResult:
     result = QuoteResult()
     if not symbols:
         return result
+    if len(symbols) > STOCK_QUOTE_HARD_CAP:
+        raise RuntimeError(
+            "Stock live quote request count {} exceeds hard cap {}".format(
+                len(symbols), STOCK_QUOTE_HARD_CAP
+            )
+        )
     if client is None:
         from src.data.marketdata_client import MarketDataClient
         client = MarketDataClient()
@@ -74,24 +85,24 @@ def fetch_stock_live_quotes(symbols: List[str], client=None) -> QuoteResult:
             result.failed.append(sym)
             continue
 
-        if not payload:
+        if not payload or payload.get("raw", {}).get("s") != "ok":
             logger.warning("MarketData returned no data for %s", sym)
             result.failed.append(sym)
             continue
 
         result.record_headers(payload.get("headers", {}))
-        price, field = _pick_price(payload.get("quote", {}))
+        price, price_field = _pick_price(payload.get("quote", {}))
         if price is None:
             result.failed.append(sym)
             continue
 
         result.prices[sym] = price
         result.quote_meta[sym] = {
-            "price_field": field,
+            "price_field": price_field,
             "raw_status": payload.get("raw", {}).get("s"),
             "updated": payload.get("raw", {}).get("updated"),
         }
-        logger.info("[live] %s = $%.2f (%s)", sym, price, field)
+        logger.info("[live] %s = $%.2f (%s)", sym, price, price_field)
 
     return result
 
@@ -101,6 +112,12 @@ def fetch_option_live_quotes(positions: List[dict], client=None) -> QuoteResult:
     result = QuoteResult()
     if not positions:
         return result
+    if len(positions) > OPTION_QUOTE_HARD_CAP:
+        raise RuntimeError(
+            "Option live quote request count {} exceeds hard cap {}".format(
+                len(positions), OPTION_QUOTE_HARD_CAP
+            )
+        )
     if client is None:
         from src.data.marketdata_client import MarketDataClient
         client = MarketDataClient()
@@ -137,7 +154,7 @@ def fetch_option_live_quotes(positions: List[dict], client=None) -> QuoteResult:
             continue
 
         result.record_headers(payload.get("headers", {}))
-        price, field = _pick_price(payload.get("quote", {}))
+        price, price_field = _pick_price(payload.get("quote", {}))
         if price is None:
             result.failed.append(key)
             continue
@@ -145,9 +162,9 @@ def fetch_option_live_quotes(positions: List[dict], client=None) -> QuoteResult:
         result.prices[key] = price
         result.quote_meta[key] = {
             "occ": occ,
-            "price_field": field,
+            "price_field": price_field,
             "updated": payload.get("raw", {}).get("updated"),
         }
-        logger.info("[live] option %s = $%.2f (%s)", occ, price, field)
+        logger.info("[live] option %s = $%.2f (%s)", occ, price, price_field)
 
     return result
