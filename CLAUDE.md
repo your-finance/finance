@@ -100,6 +100,9 @@
 | **前瞻预期更新** | 周频 | 周六 10:30 | `cron_forward.log` |
 
 **本地 launchd**：
+| **Portfolio Intelligence** | 日频 | 夏令时 22:00 SGT / 冬令时 23:00 SGT | `cron_intelligence.log` |
+
+- **PI live quote 约束**: `scripts/portfolio_intelligence.py` 依赖 MarketData live quote，只允许在 `FINANCE_ENV=cloud` 环境运行；本地调试必须显式传 `--allow-local`
 
 | 任务 | 时间 | plist |
 |------|------|-------|
