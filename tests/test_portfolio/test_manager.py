@@ -200,3 +200,256 @@ class TestExecuteTrade:
         assert len(txns) == 2
         assert txns[0]["action"] == "BUY"
         assert txns[1]["action"] == "ADD"
+
+
+@pytest.fixture
+def opt_store(tmp_path):
+    """Store with QQQ + EWY companies seeded for option tests."""
+    db_path = tmp_path / "test_company_opt.db"
+    s = CompanyStore(db_path=db_path)
+    s.upsert_company("QQQ", company_name="Invesco QQQ Trust")
+    s.upsert_company("EWY", company_name="iShares MSCI South Korea ETF")
+    yield s
+    s.close()
+
+
+@pytest.fixture
+def opt_manager(opt_store):
+    from portfolio.holdings.manager import PortfolioManager
+    return PortfolioManager(store=opt_store)
+
+
+def _opt_args(**overrides):
+    base = dict(
+        symbol="QQQ",
+        expiration="2026-09-18",
+        strike=410.0,
+        side="PUT",
+        action="BTO",
+        quantity=10,
+        premium=4.50,
+        date="2026-04-01",
+        strategy_tag="",
+        notes="",
+    )
+    base.update(overrides)
+    return base
+
+
+class TestOptionTradeEngine:
+    def test_bto_opens_long_and_debits_cash(self, opt_manager):
+        opt_manager._store.set_cash(100000.0)
+        result = opt_manager.execute_option_trade(**_opt_args(
+            action="BTO", quantity=10, premium=4.50,
+        ))
+        assert result["effect"] == "OPEN"
+        assert result["new_quantity"] == 10
+        assert result["new_avg_premium"] == pytest.approx(4.50)
+        assert result["cash_delta"] == pytest.approx(-4500.0)
+        assert opt_manager._store.get_cash_balance() == pytest.approx(95500.0)
+        pos = opt_manager._store.get_open_option_position(
+            symbol="QQQ", expiration="2026-09-18", strike=410.0, side="PUT",
+        )
+        assert pos["quantity"] == 10
+        assert pos["avg_premium"] == pytest.approx(4.50)
+
+    def test_bto_adds_to_existing_long_and_reprices_avg(self, opt_manager):
+        opt_manager._store.set_cash(100000.0)
+        opt_manager.execute_option_trade(**_opt_args(action="BTO", quantity=10, premium=4.00))
+        result = opt_manager.execute_option_trade(**_opt_args(action="BTO", quantity=5, premium=5.20))
+        assert result["effect"] == "ADD"
+        assert result["new_quantity"] == 15
+        # weighted avg = (10*4.00 + 5*5.20) / 15 = (40 + 26) / 15 = 4.40
+        assert result["new_avg_premium"] == pytest.approx((10 * 4.00 + 5 * 5.20) / 15)
+        # cash spent = 4000 + 2600 = 6600
+        assert opt_manager._store.get_cash_balance() == pytest.approx(100000.0 - 4000 - 2600)
+
+    def test_stc_partially_closes_long_and_realizes_pnl(self, opt_manager):
+        opt_manager._store.set_cash(100000.0)
+        opt_manager.execute_option_trade(**_opt_args(action="BTO", quantity=10, premium=4.00))
+        result = opt_manager.execute_option_trade(**_opt_args(action="STC", quantity=4, premium=6.50))
+        assert result["effect"] == "REDUCE"
+        assert result["new_quantity"] == 6
+        # remaining avg unchanged
+        assert result["new_avg_premium"] == pytest.approx(4.00)
+        # realized = (6.50 - 4.00) * 4 * 100 = 1000
+        assert result["realized_pnl_this_trade"] == pytest.approx(1000.0)
+        # cash: -4000 + 2600 = -1400
+        assert opt_manager._store.get_cash_balance() == pytest.approx(100000.0 - 4000 + 2600)
+        pos = opt_manager._store.get_open_option_position(
+            symbol="QQQ", expiration="2026-09-18", strike=410.0, side="PUT",
+        )
+        assert pos["realized_pnl"] == pytest.approx(1000.0)
+
+    def test_stc_full_close_long(self, opt_manager):
+        opt_manager._store.set_cash(100000.0)
+        opt_manager.execute_option_trade(**_opt_args(action="BTO", quantity=10, premium=4.00))
+        result = opt_manager.execute_option_trade(**_opt_args(action="STC", quantity=10, premium=6.50))
+        assert result["effect"] == "CLOSE"
+        assert result["new_quantity"] == 0
+        # realized = (6.50 - 4.00) * 10 * 100 = 2500
+        assert result["realized_pnl_this_trade"] == pytest.approx(2500.0)
+        assert opt_manager._store.get_open_option_position(
+            symbol="QQQ", expiration="2026-09-18", strike=410.0, side="PUT",
+        ) is None
+
+    def test_sto_opens_short_and_credits_cash(self, opt_manager):
+        opt_manager._store.set_cash(100000.0)
+        result = opt_manager.execute_option_trade(**_opt_args(
+            action="STO", quantity=10, premium=4.78,
+        ))
+        assert result["effect"] == "OPEN"
+        assert result["new_quantity"] == -10
+        assert result["new_avg_premium"] == pytest.approx(4.78)
+        assert result["cash_delta"] == pytest.approx(+4780.0)
+        assert opt_manager._store.get_cash_balance() == pytest.approx(104780.0)
+
+    def test_btc_partially_closes_short_and_realizes_pnl(self, opt_manager):
+        opt_manager._store.set_cash(100000.0)
+        opt_manager.execute_option_trade(**_opt_args(action="STO", quantity=10, premium=4.78))
+        result = opt_manager.execute_option_trade(**_opt_args(action="BTC", quantity=4, premium=2.10))
+        assert result["effect"] == "REDUCE"
+        assert result["new_quantity"] == -6
+        assert result["new_avg_premium"] == pytest.approx(4.78)
+        # realized = (4.78 - 2.10) * 4 * 100 = 1072
+        assert result["realized_pnl_this_trade"] == pytest.approx(1072.0)
+        assert opt_manager._store.get_cash_balance() == pytest.approx(100000.0 + 4780 - 840)
+
+    def test_btc_full_cover_short(self, opt_manager):
+        opt_manager._store.set_cash(100000.0)
+        opt_manager.execute_option_trade(**_opt_args(action="STO", quantity=10, premium=4.78))
+        result = opt_manager.execute_option_trade(**_opt_args(action="BTC", quantity=10, premium=2.10))
+        assert result["effect"] == "CLOSE"
+        assert result["new_quantity"] == 0
+        # realized = (4.78 - 2.10) * 10 * 100 = 2680
+        assert result["realized_pnl_this_trade"] == pytest.approx(2680.0)
+        assert opt_manager._store.get_open_option_position(
+            symbol="QQQ", expiration="2026-09-18", strike=410.0, side="PUT",
+        ) is None
+
+    def test_reject_over_close_for_option_leg(self, opt_manager):
+        opt_manager._store.set_cash(100000.0)
+        opt_manager.execute_option_trade(**_opt_args(action="BTO", quantity=10, premium=4.00))
+        with pytest.raises(ValueError, match="quantity"):
+            opt_manager.execute_option_trade(**_opt_args(action="STC", quantity=11, premium=5.00))
+        # state unchanged
+        pos = opt_manager._store.get_open_option_position(
+            symbol="QQQ", expiration="2026-09-18", strike=410.0, side="PUT",
+        )
+        assert pos["quantity"] == 10
+        assert opt_manager._store.get_cash_balance() == pytest.approx(100000.0 - 4000)
+
+    def test_reject_close_when_no_open_leg(self, opt_manager):
+        opt_manager._store.set_cash(100000.0)
+        with pytest.raises(ValueError, match="no open"):
+            opt_manager.execute_option_trade(**_opt_args(action="STC", quantity=5, premium=4.00))
+
+    def test_reject_action_against_wrong_direction(self, opt_manager):
+        """STO when long is open should be rejected (would flip sign)."""
+        opt_manager._store.set_cash(100000.0)
+        opt_manager.execute_option_trade(**_opt_args(action="BTO", quantity=10, premium=4.00))
+        with pytest.raises(ValueError, match="direction"):
+            opt_manager.execute_option_trade(**_opt_args(action="STO", quantity=5, premium=4.00))
+
+    def test_preview_matches_execute_for_btc(self, opt_manager):
+        opt_manager._store.set_cash(100000.0)
+        opt_manager.execute_option_trade(**_opt_args(action="STO", quantity=10, premium=4.78))
+        preview = opt_manager.preview_option_trade(**_opt_args(action="BTC", quantity=10, premium=2.10))
+        assert preview["effect"] == "CLOSE"
+        assert preview["new_quantity"] == 0
+        assert preview["cash_delta"] == pytest.approx(-2100.0)
+        assert preview["realized_pnl_this_trade"] == pytest.approx(2680.0)
+        # preview must NOT mutate state
+        assert opt_manager._store.get_cash_balance() == pytest.approx(104780.0)
+        pos = opt_manager._store.get_open_option_position(
+            symbol="QQQ", expiration="2026-09-18", strike=410.0, side="PUT",
+        )
+        assert pos["quantity"] == -10
+
+    def test_transactions_logged_for_option_trade(self, opt_manager):
+        opt_manager._store.set_cash(100000.0)
+        opt_manager.execute_option_trade(**_opt_args(action="STO", quantity=10, premium=4.78))
+        opt_manager.execute_option_trade(**_opt_args(action="BTC", quantity=10, premium=2.10))
+        txns = opt_manager._store.get_option_transactions(symbol="QQQ")
+        assert len(txns) == 2
+        assert txns[0]["action"] == "STO"
+        assert txns[1]["action"] == "BTC"
+        # both linked to same option position id
+        assert txns[0]["option_position_id"] == txns[1]["option_position_id"]
+
+    def test_strategy_tag_distinguishes_legs(self, opt_manager):
+        opt_manager._store.set_cash(100000.0)
+        opt_manager.execute_option_trade(**_opt_args(
+            action="STO", quantity=10, premium=4.78, strategy_tag="tail_hedge",
+        ))
+        opt_manager.execute_option_trade(**_opt_args(
+            action="STO", quantity=5, premium=5.20, strategy_tag="theta_carry",
+        ))
+        all_pos = opt_manager._store.get_open_option_positions(symbol="QQQ")
+        assert len(all_pos) == 2
+
+    def test_roll_is_atomic_close_then_open(self, opt_manager):
+        opt_manager._store.set_cash(100000.0)
+        opt_manager.execute_option_trade(**_opt_args(
+            action="STO", quantity=10, premium=4.78, strategy_tag="tail_hedge",
+        ))
+        cash_before = opt_manager._store.get_cash_balance()
+        result = opt_manager.execute_option_roll(
+            close_leg=_opt_args(
+                action="BTC", quantity=10, premium=2.10, strategy_tag="tail_hedge",
+            ),
+            open_leg=_opt_args(
+                expiration="2026-12-19", strike=380.0,
+                action="STO", quantity=10, premium=6.50, strategy_tag="tail_hedge",
+            ),
+            date="2026-04-15",
+            notes="ROLL QQQ 260918 410P -> 261219 380P",
+        )
+        assert result["close"]["effect"] == "CLOSE"
+        assert result["open"]["effect"] == "OPEN"
+        # close leg cash: -2100, open leg cash: +6500 → net +4400
+        net_delta = result["close"]["cash_delta"] + result["open"]["cash_delta"]
+        assert net_delta == pytest.approx(-2100 + 6500)
+        assert opt_manager._store.get_cash_balance() == pytest.approx(cash_before + net_delta)
+        # old leg gone, new leg open
+        assert opt_manager._store.get_open_option_position(
+            symbol="QQQ", expiration="2026-09-18", strike=410.0, side="PUT",
+            strategy_tag="tail_hedge",
+        ) is None
+        new_leg = opt_manager._store.get_open_option_position(
+            symbol="QQQ", expiration="2026-12-19", strike=380.0, side="PUT",
+            strategy_tag="tail_hedge",
+        )
+        assert new_leg["quantity"] == -10
+        assert new_leg["avg_premium"] == pytest.approx(6.50)
+
+    def test_roll_rolls_back_on_open_leg_failure(self, opt_manager):
+        """If the open leg of a roll fails, the close leg must also be rolled back."""
+        opt_manager._store.set_cash(100000.0)
+        opt_manager.execute_option_trade(**_opt_args(
+            action="STO", quantity=10, premium=4.78, strategy_tag="tail_hedge",
+        ))
+        cash_before = opt_manager._store.get_cash_balance()
+        # Sabotage: open leg uses an invalid action that should ValueError mid-transaction
+        with pytest.raises(Exception):
+            opt_manager.execute_option_roll(
+                close_leg=_opt_args(
+                    action="BTC", quantity=10, premium=2.10, strategy_tag="tail_hedge",
+                ),
+                open_leg=_opt_args(
+                    expiration="2026-12-19", strike=380.0,
+                    action="STC",  # invalid: STC requires existing long
+                    quantity=10, premium=6.50, strategy_tag="tail_hedge",
+                ),
+                date="2026-04-15",
+                notes="bad roll",
+            )
+        # Cash unchanged
+        assert opt_manager._store.get_cash_balance() == pytest.approx(cash_before)
+        # Original short leg still open
+        pos = opt_manager._store.get_open_option_position(
+            symbol="QQQ", expiration="2026-09-18", strike=410.0, side="PUT",
+            strategy_tag="tail_hedge",
+        )
+        assert pos is not None
+        assert pos["quantity"] == -10
