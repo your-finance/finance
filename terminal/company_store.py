@@ -22,6 +22,25 @@ logger = logging.getLogger(__name__)
 _PROJECT_ROOT = Path(__file__).parent.parent
 _DEFAULT_DB_PATH = _PROJECT_ROOT / "data" / "company.db"
 
+
+class DuplicateOpenOptionLegError(RuntimeError):
+    """Raised when >1 OPEN option_positions rows match the same 5-tuple identity.
+
+    Identity = (symbol, expiration, strike, side, COALESCE(strategy_tag, '')).
+    Indicates a broken invariant — lifecycle engine must not proceed until
+    Boss reconciles (merge or close the stale leg manually).
+    """
+
+
+def _normalize_strategy_tag(tag: Optional[str]) -> str:
+    """Collapse None / missing strategy_tag to empty string.
+
+    Write path must funnel all tags through this so the DB never stores NULL
+    alongside '', which would let two 'same' OPEN legs coexist despite the
+    unique index (SQLite treats NULL as distinct in plain indexes).
+    """
+    return tag if tag else ""
+
 # ---------------------------------------------------------------------------
 # Schema
 # ---------------------------------------------------------------------------
@@ -191,11 +210,35 @@ CREATE TABLE IF NOT EXISTS option_positions (
     status TEXT NOT NULL DEFAULT 'OPEN',
     strategy_tag TEXT DEFAULT '',
     notes TEXT DEFAULT '',
+    realized_pnl REAL DEFAULT 0,
     last_updated TEXT NOT NULL
 );
 
 CREATE INDEX IF NOT EXISTS idx_option_pos_symbol ON option_positions(symbol);
 CREATE INDEX IF NOT EXISTS idx_option_pos_status ON option_positions(status);
+-- NOTE: idx_option_pos_open_contract (UNIQUE, partial, COALESCE expression) is
+-- created in _migrate_if_needed AFTER dup detection runs. Creating it here
+-- would IntegrityError on legacy DBs with pre-existing duplicates before the
+-- migration gets a chance to surface them cleanly.
+
+CREATE TABLE IF NOT EXISTS option_transactions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    option_position_id INTEGER REFERENCES option_positions(id),
+    symbol TEXT NOT NULL,
+    expiration TEXT NOT NULL,
+    strike REAL NOT NULL,
+    side TEXT NOT NULL,
+    action TEXT NOT NULL,
+    quantity INTEGER NOT NULL,
+    premium REAL NOT NULL,
+    date TEXT NOT NULL,
+    strategy_tag TEXT DEFAULT '',
+    notes TEXT DEFAULT '',
+    created_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_option_txn_symbol ON option_transactions(symbol);
+CREATE INDEX IF NOT EXISTS idx_option_txn_position ON option_transactions(option_position_id);
 
 CREATE TABLE IF NOT EXISTS portfolio_cash (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -352,6 +395,87 @@ class CompanyStore:
                 conn.execute("ALTER TABLE holdings ADD COLUMN notes TEXT DEFAULT ''")
             if "last_review_date" not in h_cols:
                 conn.execute("ALTER TABLE holdings ADD COLUMN last_review_date TEXT DEFAULT ''")
+
+        # --- Migration 7: option lifecycle (realized_pnl + option_transactions + unique OPEN index) ---
+        if "option_positions" in tables:
+            op_cols = {row[1] for row in conn.execute("PRAGMA table_info(option_positions)")}
+            if "realized_pnl" not in op_cols:
+                conn.execute("ALTER TABLE option_positions ADD COLUMN realized_pnl REAL DEFAULT 0")
+
+        # --- Migration 8: strategy_tag NULL→'' + COALESCE-expression unique index ---
+        # Rationale: the original unique index on raw strategy_tag let a NULL row
+        # and a '' row coexist as 'two different' OPEN legs despite identical
+        # identity. Funnel existing rows to '' so the invariant holds, then
+        # rebuild the index using COALESCE so any NULL that ever slips in is
+        # still blocked at the DB layer.
+        #
+        # STEP ORDER matters: a legacy DB may still carry the old raw-strategy_tag
+        # unique index. If we UPDATE NULL→'' first, the old index fires on the
+        # collapsed key and raises sqlite3.IntegrityError before our detection
+        # logic runs — the operator loses the dup id list. So: detect first
+        # under COALESCE (sees NULL+'' as identical), then DROP the legacy index,
+        # then UPDATE, then CREATE the COALESCE-expression index.
+        if "option_positions" in tables:
+            dup_rows = conn.execute("""
+                SELECT symbol, expiration, strike, side,
+                       COALESCE(strategy_tag, '') AS tag, COUNT(*) AS n,
+                       GROUP_CONCAT(id) AS ids
+                FROM option_positions
+                WHERE status = 'OPEN'
+                GROUP BY symbol, expiration, strike, side, COALESCE(strategy_tag, '')
+                HAVING n > 1
+            """).fetchall()
+            if dup_rows:
+                dup_detail = [dict(r) for r in dup_rows]
+                logger.error(
+                    "Migration 8 aborted: %d duplicate OPEN contract key(s) under COALESCE(strategy_tag,''): %s",
+                    len(dup_rows), dup_detail,
+                )
+                raise DuplicateOpenOptionLegError(
+                    f"option_positions has {len(dup_rows)} duplicate OPEN contract key(s); "
+                    f"reconcile manually before reopening the DB. Detail: {dup_detail}"
+                )
+
+            # Drop the legacy raw-strategy_tag index before NULL→'' UPDATE so
+            # the UPDATE can't trip the old unique constraint on the collapsed key.
+            conn.execute("DROP INDEX IF EXISTS idx_option_pos_open_contract")
+
+        if "option_positions" in tables:
+            conn.execute(
+                "UPDATE option_positions SET strategy_tag = '' WHERE strategy_tag IS NULL"
+            )
+        if "option_transactions" in tables:
+            conn.execute(
+                "UPDATE option_transactions SET strategy_tag = '' WHERE strategy_tag IS NULL"
+            )
+
+        if "option_positions" in tables:
+            conn.execute("""
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_option_pos_open_contract
+                    ON option_positions(symbol, expiration, strike, side, COALESCE(strategy_tag, ''))
+                    WHERE status = 'OPEN'
+            """)
+
+        if "option_transactions" not in tables:
+            conn.executescript("""
+                CREATE TABLE IF NOT EXISTS option_transactions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    option_position_id INTEGER REFERENCES option_positions(id),
+                    symbol TEXT NOT NULL,
+                    expiration TEXT NOT NULL,
+                    strike REAL NOT NULL,
+                    side TEXT NOT NULL,
+                    action TEXT NOT NULL,
+                    quantity INTEGER NOT NULL,
+                    premium REAL NOT NULL,
+                    date TEXT NOT NULL,
+                    strategy_tag TEXT DEFAULT '',
+                    notes TEXT DEFAULT '',
+                    created_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_option_txn_symbol ON option_transactions(symbol);
+                CREATE INDEX IF NOT EXISTS idx_option_txn_position ON option_transactions(option_position_id);
+            """)
 
         conn.commit()
 
@@ -880,9 +1004,10 @@ class CompanyStore:
 
     def insert_option_position(self, symbol: str, expiration: str, strike: float,
                                 side: str, quantity: int, avg_premium: float,
-                                open_date: str, strategy_tag: str = "",
+                                open_date: str, strategy_tag: Optional[str] = "",
                                 notes: str = "") -> int:
         now = datetime.now().isoformat()
+        tag = _normalize_strategy_tag(strategy_tag)
         conn = self._get_conn()
         cur = conn.execute(
             """INSERT INTO option_positions
@@ -890,9 +1015,93 @@ class CompanyStore:
                 open_date, status, strategy_tag, notes, last_updated)
                VALUES (?, ?, ?, ?, ?, ?, ?, 'OPEN', ?, ?, ?)""",
             (symbol.upper(), expiration, strike, side.upper(), quantity,
-             avg_premium, open_date, strategy_tag, notes, now),
+             avg_premium, open_date, tag, notes, now),
         )
         return cur.lastrowid
+
+    def get_open_option_position(
+        self,
+        symbol: str,
+        expiration: str,
+        strike: float,
+        side: str,
+        strategy_tag: Optional[str] = "",
+    ) -> Optional[Dict[str, Any]]:
+        """Return single OPEN leg matching the 5-tuple identity, or None.
+
+        Raises DuplicateOpenOptionLegError if >1 rows match — invariant broken,
+        lifecycle engine must not proceed on an arbitrarily-chosen leg.
+        """
+        tag = _normalize_strategy_tag(strategy_tag)
+        conn = self._get_conn()
+        rows = conn.execute(
+            """SELECT * FROM option_positions
+               WHERE status = 'OPEN'
+                 AND symbol = ? AND expiration = ? AND strike = ?
+                 AND side = ? AND COALESCE(strategy_tag, '') = ?""",
+            (symbol.upper(), expiration, strike, side.upper(), tag),
+        ).fetchall()
+        if not rows:
+            return None
+        if len(rows) > 1:
+            ids = [r["id"] for r in rows]
+            raise DuplicateOpenOptionLegError(
+                f"{len(rows)} OPEN legs match "
+                f"({symbol.upper()}, {expiration}, {strike}, {side.upper()}, "
+                f"strategy_tag={tag!r}); ids={ids}. Reconcile manually."
+            )
+        return dict(rows[0])
+
+    def insert_option_transaction(
+        self,
+        *,
+        option_position_id: Optional[int],
+        symbol: str,
+        expiration: str,
+        strike: float,
+        side: str,
+        action: str,
+        quantity: int,
+        premium: float,
+        date: str,
+        strategy_tag: Optional[str] = "",
+        notes: str = "",
+    ) -> int:
+        """Append an option trade ledger entry. Pure CRUD — no lifecycle logic."""
+        now = datetime.now().isoformat()
+        tag = _normalize_strategy_tag(strategy_tag)
+        conn = self._get_conn()
+        cur = conn.execute(
+            """INSERT INTO option_transactions
+               (option_position_id, symbol, expiration, strike, side,
+                action, quantity, premium, date, strategy_tag, notes, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (option_position_id, symbol.upper(), expiration, strike, side.upper(),
+             action.upper(), quantity, premium, date, tag, notes, now),
+        )
+        return cur.lastrowid
+
+    def get_option_transactions(
+        self,
+        symbol: Optional[str] = None,
+        option_position_id: Optional[int] = None,
+    ) -> List[Dict[str, Any]]:
+        """Read option ledger filtered by symbol and/or position id, ordered by id."""
+        conn = self._get_conn()
+        clauses = []
+        params: List[Any] = []
+        if symbol:
+            clauses.append("symbol = ?")
+            params.append(symbol.upper())
+        if option_position_id is not None:
+            clauses.append("option_position_id = ?")
+            params.append(option_position_id)
+        where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
+        rows = conn.execute(
+            f"SELECT * FROM option_transactions {where} ORDER BY id",
+            tuple(params),
+        ).fetchall()
+        return [dict(r) for r in rows]
 
     def get_open_option_positions(self, symbol: str = None) -> List[Dict[str, Any]]:
         conn = self._get_conn()

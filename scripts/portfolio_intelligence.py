@@ -231,6 +231,53 @@ def _latest_signal_date(df: pd.DataFrame) -> str | None:
     return value.strftime("%Y-%m-%d")
 
 
+# ---- positions-as-of helper ----
+
+def get_positions_as_of(store) -> dict:
+    """Return position-book freshness timestamps as YYYY-MM-DD strings.
+
+    Returns a dict with two keys:
+      - "latest": MAX(last_updated) across holdings/option_positions/portfolio_cash.
+        Represents "was the position book touched recently"; None if all empty.
+      - "oldest_open_option": MIN(last_updated) among OPEN option_positions only.
+        Represents "is there a stale OPEN leg hiding"; None if no OPEN legs.
+
+    The header renderer uses both so a frequently-updated cash row cannot mask
+    a months-old OPEN option leg — the exact visibility gap this helper is
+    designed to close.
+    """
+    conn = store._get_conn()
+    candidates: list[str] = []
+
+    row = conn.execute(
+        "SELECT MAX(last_updated) FROM holdings WHERE status = 'OPEN'"
+    ).fetchone()
+    if row and row[0]:
+        candidates.append(row[0])
+
+    row = conn.execute(
+        "SELECT MAX(last_updated) FROM option_positions WHERE status = 'OPEN'"
+    ).fetchone()
+    if row and row[0]:
+        candidates.append(row[0])
+
+    row = conn.execute(
+        "SELECT MAX(updated_at) FROM portfolio_cash"
+    ).fetchone()
+    if row and row[0]:
+        candidates.append(row[0])
+
+    # Oldest OPEN option leg — independent field to surface stale legs.
+    row = conn.execute(
+        "SELECT MIN(last_updated) FROM option_positions WHERE status = 'OPEN'"
+    ).fetchone()
+    oldest_open_option = row[0][:10] if row and row[0] else None
+
+    # ISO timestamps sort lexicographically. Slice to date portion.
+    latest = max(candidates)[:10] if candidates else None
+    return {"latest": latest, "oldest_open_option": oldest_open_option}
+
+
 # ---- 格式化 ----
 
 def format_report(
@@ -536,11 +583,17 @@ def run_intelligence(dry_run: bool = False, allow_local: bool = False) -> str:
     }
 
     et_now = datetime.now(ZoneInfo("America/New_York"))
+    positions_as_of = get_positions_as_of(store)
+    latest = positions_as_of["latest"]
+    oldest_open_option = positions_as_of["oldest_open_option"]
     snapshot_line = (
         f"📍 NAV 快照 ET {et_now.strftime('%Y-%m-%d %H:%M')} "
+        f"| positions as of {latest or 'unknown'} "
         f"| live {len(stock_live_result.prices)}/{len(us_symbols)} "
         f"| signals as of {signals_as_of or 'unknown'}"
     )
+    if oldest_open_option and oldest_open_option != latest:
+        snapshot_line += f" | oldest open option {oldest_open_option}"
     if fallback_symbols:
         snapshot_line += f" | ⚠️ fallback: {','.join(fallback_symbols)}"
     if option_positions:

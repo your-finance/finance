@@ -17,6 +17,7 @@ from portfolio.holdings.schema import (
     OPRMS_TIMING_DEFAULTS,
     OPRMS_TIMING_COEFFICIENTS,
 )
+from terminal.company_store import _normalize_strategy_tag
 
 logger = logging.getLogger(__name__)
 
@@ -213,6 +214,333 @@ class PortfolioManager:
         except Exception:
             conn.rollback()
             raise
+
+    # ---- Atomic Option Trade ----
+
+    def preview_option_trade(
+        self,
+        *,
+        symbol: str,
+        expiration: str,
+        strike: float,
+        side: str,
+        action: str,
+        quantity: int,
+        premium: float,
+        date: str,
+        strategy_tag: str = "",
+        notes: str = "",
+    ) -> Dict:
+        """Compute lifecycle effect WITHOUT mutating any DB state.
+
+        Returns a dict with the fields trade.md needs to render its confirmation.
+        Raises ValueError on direction conflicts or over-close — same errors that
+        execute_option_trade would raise so the prompt can show them to Boss.
+        """
+        derivation = self._derive_option_lifecycle(
+            symbol=symbol, expiration=expiration, strike=strike, side=side,
+            action=action, quantity=quantity, premium=premium,
+            strategy_tag=strategy_tag,
+        )
+        return {
+            "contract": f"{symbol.upper()} {expiration} {strike:g}{('C' if side.upper() == 'CALL' else 'P')}",
+            "action": action.upper(),
+            "effect": derivation["effect"],
+            "current_quantity": derivation["current_qty"],
+            "new_quantity": derivation["new_qty"],
+            "current_avg_premium": derivation["current_avg"],
+            "new_avg_premium": derivation["new_avg"],
+            "cash_delta": derivation["cash_delta"],
+            "realized_pnl_this_trade": derivation["realized_pnl"],
+            "strategy_tag": strategy_tag,
+            "notes": notes,
+            "date": date,
+        }
+
+    def execute_option_trade(
+        self,
+        *,
+        symbol: str,
+        expiration: str,
+        strike: float,
+        side: str,
+        action: str,
+        quantity: int,
+        premium: float,
+        date: str,
+        strategy_tag: str = "",
+        notes: str = "",
+    ) -> Dict:
+        """Atomically apply an option trade: ledger row + position update + cash row."""
+        conn = self._store._get_conn()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            result = self._apply_option_trade_in_transaction(
+                conn=conn,
+                symbol=symbol, expiration=expiration, strike=strike, side=side,
+                action=action, quantity=quantity, premium=premium, date=date,
+                strategy_tag=strategy_tag, notes=notes,
+            )
+            conn.execute("COMMIT")
+            return result
+        except Exception:
+            conn.execute("ROLLBACK")
+            raise
+
+    def execute_option_roll(
+        self,
+        *,
+        close_leg: Dict,
+        open_leg: Dict,
+        date: str,
+        notes: str = "",
+    ) -> Dict:
+        """Atomic 1-out-1-in roll. Both legs in the same SQLite transaction."""
+        conn = self._store._get_conn()
+        roll_marker = notes or "ROLL"
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            close_args = dict(close_leg)
+            close_args.setdefault("date", date)
+            close_args["notes"] = (close_args.get("notes") or "") + f" [{roll_marker}]"
+            close_result = self._apply_option_trade_in_transaction(conn=conn, **close_args)
+
+            open_args = dict(open_leg)
+            open_args.setdefault("date", date)
+            open_args["notes"] = (open_args.get("notes") or "") + f" [{roll_marker}]"
+            open_result = self._apply_option_trade_in_transaction(conn=conn, **open_args)
+
+            conn.execute("COMMIT")
+            return {"close": close_result, "open": open_result}
+        except Exception:
+            conn.execute("ROLLBACK")
+            raise
+
+    # ---- Option lifecycle internals ----
+
+    _OPTION_ACTIONS = {"BTO", "STO", "BTC", "STC"}
+
+    def _derive_option_lifecycle(
+        self,
+        *,
+        symbol: str,
+        expiration: str,
+        strike: float,
+        side: str,
+        action: str,
+        quantity: int,
+        premium: float,
+        strategy_tag: str,
+    ) -> Dict:
+        """Pure function — no DB writes. Reads current OPEN leg for context."""
+        action = action.upper()
+        side = side.upper()
+        symbol = symbol.upper()
+
+        if action not in self._OPTION_ACTIONS:
+            raise ValueError(
+                f"unknown option action {action!r}. Use BTO / STO / BTC / STC."
+            )
+        if quantity <= 0:
+            raise ValueError(f"option quantity must be positive, got {quantity}")
+        if premium < 0:
+            raise ValueError(f"option premium must be non-negative, got {premium}")
+        if side not in ("CALL", "PUT"):
+            raise ValueError(f"option side must be CALL or PUT, got {side!r}")
+
+        current = self._store.get_open_option_position(
+            symbol=symbol, expiration=expiration, strike=strike,
+            side=side, strategy_tag=strategy_tag,
+        )
+        current_qty = current["quantity"] if current else 0
+        current_avg = current["avg_premium"] if current else None
+
+        # Direction & cash sign
+        if action == "BTO":
+            qty_delta, cash_sign = +quantity, -1
+        elif action == "STO":
+            qty_delta, cash_sign = -quantity, +1
+        elif action == "STC":
+            qty_delta, cash_sign = -quantity, +1
+        else:  # BTC
+            qty_delta, cash_sign = +quantity, -1
+
+        cash_delta = cash_sign * quantity * premium * 100.0
+        new_qty = current_qty + qty_delta
+
+        # Validate effect against current state
+        if action in ("BTO", "STO"):
+            # Opening / adding
+            if current is None:
+                effect = "OPEN"
+                new_avg = premium
+                realized = 0.0
+            else:
+                same_dir = (current_qty > 0 and action == "BTO") or (current_qty < 0 and action == "STO")
+                if not same_dir:
+                    raise ValueError(
+                        f"direction conflict: current OPEN leg quantity={current_qty}, "
+                        f"action={action} would flip sign. Use {'STC' if current_qty > 0 else 'BTC'} "
+                        f"to close, or execute_option_roll() for an explicit roll."
+                    )
+                # Add — weighted avg over absolute sizes
+                old_abs = abs(current_qty)
+                add_abs = quantity
+                new_avg = (old_abs * current_avg + add_abs * premium) / (old_abs + add_abs)
+                effect = "ADD"
+                realized = 0.0
+        else:
+            # Closing actions
+            if current is None:
+                raise ValueError(
+                    f"no open leg for {symbol} {expiration} {strike:g}{side[0]} "
+                    f"(strategy_tag={strategy_tag!r}); cannot {action}."
+                )
+            if action == "STC" and current_qty <= 0:
+                raise ValueError(
+                    f"direction conflict: STC requires a long leg, but current quantity={current_qty}."
+                )
+            if action == "BTC" and current_qty >= 0:
+                raise ValueError(
+                    f"direction conflict: BTC requires a short leg, but current quantity={current_qty}."
+                )
+            # Over-close check: |new_qty| must not exceed |current| AND must not flip sign
+            if abs(quantity) > abs(current_qty):
+                raise ValueError(
+                    f"quantity {quantity} exceeds open quantity |{current_qty}|; "
+                    f"split into CLOSE + OPEN or use execute_option_roll()."
+                )
+            closed_qty = quantity  # absolute
+            if action == "STC":  # closing long
+                realized = (premium - current_avg) * closed_qty * 100.0
+            else:  # BTC, covering short
+                realized = (current_avg - premium) * closed_qty * 100.0
+            if new_qty == 0:
+                effect = "CLOSE"
+                new_avg = None
+            else:
+                effect = "REDUCE"
+                new_avg = current_avg  # avg unchanged on partial close
+
+        return {
+            "current_position_id": current["id"] if current else None,
+            "current_qty": current_qty,
+            "current_avg": current_avg,
+            "new_qty": new_qty,
+            "new_avg": new_avg,
+            "cash_delta": cash_delta,
+            "realized_pnl": realized,
+            "effect": effect,
+        }
+
+    def _apply_option_trade_in_transaction(
+        self,
+        *,
+        conn,
+        symbol: str,
+        expiration: str,
+        strike: float,
+        side: str,
+        action: str,
+        quantity: int,
+        premium: float,
+        date: str,
+        strategy_tag: str = "",
+        notes: str = "",
+    ) -> Dict:
+        """Mutating core. Caller owns the BEGIN/COMMIT/ROLLBACK."""
+        import datetime as dt
+
+        strategy_tag = _normalize_strategy_tag(strategy_tag)
+        derivation = self._derive_option_lifecycle(
+            symbol=symbol, expiration=expiration, strike=strike, side=side,
+            action=action, quantity=quantity, premium=premium,
+            strategy_tag=strategy_tag,
+        )
+        symbol = symbol.upper()
+        side = side.upper()
+        action = action.upper()
+        now = dt.datetime.now().isoformat()
+        cash_balance = self._store.get_cash_balance()
+
+        effect = derivation["effect"]
+        new_qty = derivation["new_qty"]
+        new_avg = derivation["new_avg"]
+        cash_delta = derivation["cash_delta"]
+        realized = derivation["realized_pnl"]
+        position_id = derivation["current_position_id"]
+
+        if effect == "OPEN":
+            cur = conn.execute(
+                """INSERT INTO option_positions
+                   (symbol, expiration, strike, side, quantity, avg_premium,
+                    open_date, status, strategy_tag, notes, realized_pnl, last_updated)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, 'OPEN', ?, ?, 0, ?)""",
+                (symbol, expiration, strike, side, new_qty, new_avg, date,
+                 strategy_tag, notes, now),
+            )
+            position_id = cur.lastrowid
+        elif effect == "ADD":
+            conn.execute(
+                """UPDATE option_positions
+                   SET quantity = ?, avg_premium = ?, last_updated = ?
+                   WHERE id = ?""",
+                (new_qty, new_avg, now, position_id),
+            )
+        elif effect == "REDUCE":
+            conn.execute(
+                """UPDATE option_positions
+                   SET quantity = ?,
+                       realized_pnl = COALESCE(realized_pnl, 0) + ?,
+                       last_updated = ?
+                   WHERE id = ?""",
+                (new_qty, realized, now, position_id),
+            )
+        elif effect == "CLOSE":
+            conn.execute(
+                """UPDATE option_positions
+                   SET quantity = 0, status = 'CLOSED', close_date = ?,
+                       realized_pnl = COALESCE(realized_pnl, 0) + ?,
+                       last_updated = ?
+                   WHERE id = ?""",
+                (date, realized, now, position_id),
+            )
+        else:
+            raise ValueError(f"internal: unknown effect {effect!r}")
+
+        conn.execute(
+            """INSERT INTO option_transactions
+               (option_position_id, symbol, expiration, strike, side,
+                action, quantity, premium, date, strategy_tag, notes, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (position_id, symbol, expiration, strike, side, action,
+             quantity, premium, date, strategy_tag, notes, now),
+        )
+
+        new_balance = cash_balance + cash_delta
+        cash_action = "DEPOSIT" if cash_delta >= 0 else "WITHDRAW"
+        cash_note = f"{action} {symbol} {expiration} {strike:g}{side[0]} {quantity}@{premium}"
+        if strategy_tag:
+            cash_note += f" [{strategy_tag}]"
+        conn.execute(
+            """INSERT INTO portfolio_cash (action, amount, balance_after, notes, updated_at)
+               VALUES (?, ?, ?, ?, ?)""",
+            (cash_action, cash_delta, new_balance, cash_note, now),
+        )
+
+        return {
+            "contract": f"{symbol} {expiration} {strike:g}{side[0]}",
+            "action": action,
+            "effect": effect,
+            "current_quantity": derivation["current_qty"],
+            "new_quantity": new_qty,
+            "current_avg_premium": derivation["current_avg"],
+            "new_avg_premium": new_avg,
+            "cash_delta": cash_delta,
+            "realized_pnl_this_trade": realized,
+            "strategy_tag": strategy_tag,
+            "position_id": position_id,
+        }
 
     # ---- NAV & Weights ----
 
