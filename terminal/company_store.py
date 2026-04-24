@@ -191,11 +191,34 @@ CREATE TABLE IF NOT EXISTS option_positions (
     status TEXT NOT NULL DEFAULT 'OPEN',
     strategy_tag TEXT DEFAULT '',
     notes TEXT DEFAULT '',
+    realized_pnl REAL DEFAULT 0,
     last_updated TEXT NOT NULL
 );
 
 CREATE INDEX IF NOT EXISTS idx_option_pos_symbol ON option_positions(symbol);
 CREATE INDEX IF NOT EXISTS idx_option_pos_status ON option_positions(status);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_option_pos_open_contract
+    ON option_positions(symbol, expiration, strike, side, strategy_tag)
+    WHERE status = 'OPEN';
+
+CREATE TABLE IF NOT EXISTS option_transactions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    option_position_id INTEGER REFERENCES option_positions(id),
+    symbol TEXT NOT NULL,
+    expiration TEXT NOT NULL,
+    strike REAL NOT NULL,
+    side TEXT NOT NULL,
+    action TEXT NOT NULL,
+    quantity INTEGER NOT NULL,
+    premium REAL NOT NULL,
+    date TEXT NOT NULL,
+    strategy_tag TEXT DEFAULT '',
+    notes TEXT DEFAULT '',
+    created_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_option_txn_symbol ON option_transactions(symbol);
+CREATE INDEX IF NOT EXISTS idx_option_txn_position ON option_transactions(option_position_id);
 
 CREATE TABLE IF NOT EXISTS portfolio_cash (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -352,6 +375,54 @@ class CompanyStore:
                 conn.execute("ALTER TABLE holdings ADD COLUMN notes TEXT DEFAULT ''")
             if "last_review_date" not in h_cols:
                 conn.execute("ALTER TABLE holdings ADD COLUMN last_review_date TEXT DEFAULT ''")
+
+        # --- Migration 7: option lifecycle (realized_pnl + option_transactions + unique OPEN index) ---
+        if "option_positions" in tables:
+            op_cols = {row[1] for row in conn.execute("PRAGMA table_info(option_positions)")}
+            if "realized_pnl" not in op_cols:
+                conn.execute("ALTER TABLE option_positions ADD COLUMN realized_pnl REAL DEFAULT 0")
+
+            # Detect duplicate OPEN contract keys before creating the unique index.
+            # If duplicates exist, log them loudly and skip — Boss must reconcile manually.
+            dup_rows = conn.execute("""
+                SELECT symbol, expiration, strike, side, strategy_tag, COUNT(*) AS n
+                FROM option_positions
+                WHERE status = 'OPEN'
+                GROUP BY symbol, expiration, strike, side, strategy_tag
+                HAVING n > 1
+            """).fetchall()
+            if dup_rows:
+                logger.error(
+                    "Cannot create idx_option_pos_open_contract: %d duplicate OPEN contract key(s): %s",
+                    len(dup_rows), [dict(r) for r in dup_rows],
+                )
+            else:
+                conn.execute("""
+                    CREATE UNIQUE INDEX IF NOT EXISTS idx_option_pos_open_contract
+                        ON option_positions(symbol, expiration, strike, side, strategy_tag)
+                        WHERE status = 'OPEN'
+                """)
+
+        if "option_transactions" not in tables:
+            conn.executescript("""
+                CREATE TABLE IF NOT EXISTS option_transactions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    option_position_id INTEGER REFERENCES option_positions(id),
+                    symbol TEXT NOT NULL,
+                    expiration TEXT NOT NULL,
+                    strike REAL NOT NULL,
+                    side TEXT NOT NULL,
+                    action TEXT NOT NULL,
+                    quantity INTEGER NOT NULL,
+                    premium REAL NOT NULL,
+                    date TEXT NOT NULL,
+                    strategy_tag TEXT DEFAULT '',
+                    notes TEXT DEFAULT '',
+                    created_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_option_txn_symbol ON option_transactions(symbol);
+                CREATE INDEX IF NOT EXISTS idx_option_txn_position ON option_transactions(option_position_id);
+            """)
 
         conn.commit()
 
@@ -893,6 +964,75 @@ class CompanyStore:
              avg_premium, open_date, strategy_tag, notes, now),
         )
         return cur.lastrowid
+
+    def get_open_option_position(
+        self,
+        symbol: str,
+        expiration: str,
+        strike: float,
+        side: str,
+        strategy_tag: str = "",
+    ) -> Optional[Dict[str, Any]]:
+        """Return single OPEN leg matching the 5-tuple identity, or None."""
+        conn = self._get_conn()
+        row = conn.execute(
+            """SELECT * FROM option_positions
+               WHERE status = 'OPEN'
+                 AND symbol = ? AND expiration = ? AND strike = ?
+                 AND side = ? AND COALESCE(strategy_tag, '') = ?""",
+            (symbol.upper(), expiration, strike, side.upper(), strategy_tag or ""),
+        ).fetchone()
+        return dict(row) if row else None
+
+    def insert_option_transaction(
+        self,
+        *,
+        option_position_id: Optional[int],
+        symbol: str,
+        expiration: str,
+        strike: float,
+        side: str,
+        action: str,
+        quantity: int,
+        premium: float,
+        date: str,
+        strategy_tag: str = "",
+        notes: str = "",
+    ) -> int:
+        """Append an option trade ledger entry. Pure CRUD — no lifecycle logic."""
+        now = datetime.now().isoformat()
+        conn = self._get_conn()
+        cur = conn.execute(
+            """INSERT INTO option_transactions
+               (option_position_id, symbol, expiration, strike, side,
+                action, quantity, premium, date, strategy_tag, notes, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (option_position_id, symbol.upper(), expiration, strike, side.upper(),
+             action.upper(), quantity, premium, date, strategy_tag, notes, now),
+        )
+        return cur.lastrowid
+
+    def get_option_transactions(
+        self,
+        symbol: Optional[str] = None,
+        option_position_id: Optional[int] = None,
+    ) -> List[Dict[str, Any]]:
+        """Read option ledger filtered by symbol and/or position id, ordered by id."""
+        conn = self._get_conn()
+        clauses = []
+        params: List[Any] = []
+        if symbol:
+            clauses.append("symbol = ?")
+            params.append(symbol.upper())
+        if option_position_id is not None:
+            clauses.append("option_position_id = ?")
+            params.append(option_position_id)
+        where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
+        rows = conn.execute(
+            f"SELECT * FROM option_transactions {where} ORDER BY id",
+            tuple(params),
+        ).fetchall()
+        return [dict(r) for r in rows]
 
     def get_open_option_positions(self, symbol: str = None) -> List[Dict[str, Any]]:
         conn = self._get_conn()

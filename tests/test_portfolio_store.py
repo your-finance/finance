@@ -194,6 +194,134 @@ class TestOptionPositions:
         assert pos[0]["strategy_tag"] == "tail_hedge"
 
 
+class TestOptionLifecycleSchema:
+    def test_get_open_option_position_exact_contract(self, store):
+        store.upsert_company("QQQ", company_name="Invesco QQQ Trust")
+        store.insert_option_position(
+            symbol="QQQ", expiration="2026-09-18", strike=410.0, side="PUT",
+            quantity=-10, avg_premium=4.78, open_date="2026-04-01",
+            strategy_tag="tail_hedge",
+        )
+        pos = store.get_open_option_position(
+            symbol="QQQ", expiration="2026-09-18", strike=410.0,
+            side="PUT", strategy_tag="tail_hedge",
+        )
+        assert pos is not None
+        assert pos["quantity"] == -10
+        assert pos["avg_premium"] == 4.78
+
+    def test_get_open_option_position_no_match_returns_none(self, store):
+        store.upsert_company("QQQ", company_name="Invesco QQQ Trust")
+        store.insert_option_position(
+            symbol="QQQ", expiration="2026-09-18", strike=410.0, side="PUT",
+            quantity=-10, avg_premium=4.78, open_date="2026-04-01",
+        )
+        # different strike
+        assert store.get_open_option_position(
+            symbol="QQQ", expiration="2026-09-18", strike=420.0, side="PUT",
+        ) is None
+
+    def test_get_open_option_position_distinguishes_strategy_tag(self, store):
+        store.upsert_company("QQQ", company_name="Invesco QQQ Trust")
+        store.insert_option_position(
+            symbol="QQQ", expiration="2026-09-18", strike=410.0, side="PUT",
+            quantity=-10, avg_premium=4.78, open_date="2026-04-01",
+            strategy_tag="tail_hedge",
+        )
+        # Empty tag should NOT match the tagged leg
+        assert store.get_open_option_position(
+            symbol="QQQ", expiration="2026-09-18", strike=410.0, side="PUT",
+            strategy_tag="",
+        ) is None
+
+    def test_insert_and_list_option_transactions(self, store):
+        store.upsert_company("QQQ", company_name="Invesco QQQ Trust")
+        oid = store.insert_option_position(
+            symbol="QQQ", expiration="2026-09-18", strike=410.0, side="PUT",
+            quantity=-10, avg_premium=4.78, open_date="2026-04-01",
+        )
+        store.insert_option_transaction(
+            option_position_id=oid, symbol="QQQ", expiration="2026-09-18",
+            strike=410.0, side="PUT", action="STO", quantity=10,
+            premium=4.78, date="2026-04-01",
+        )
+        store.insert_option_transaction(
+            option_position_id=oid, symbol="QQQ", expiration="2026-09-18",
+            strike=410.0, side="PUT", action="BTC", quantity=10,
+            premium=2.10, date="2026-04-15",
+        )
+        txns = store.get_option_transactions(symbol="QQQ")
+        assert len(txns) == 2
+        # ordered by id (insert order)
+        assert txns[0]["action"] == "STO"
+        assert txns[1]["action"] == "BTC"
+        assert txns[0]["option_position_id"] == oid
+
+    def test_get_option_transactions_filter_by_position_id(self, store):
+        store.upsert_company("QQQ", company_name="Invesco QQQ Trust")
+        store.upsert_company("EWY", company_name="iShares MSCI South Korea ETF")
+        oid_a = store.insert_option_position(
+            symbol="QQQ", expiration="2026-09-18", strike=410.0, side="PUT",
+            quantity=-10, avg_premium=4.78, open_date="2026-04-01",
+        )
+        oid_b = store.insert_option_position(
+            symbol="EWY", expiration="2026-07-17", strike=160.0, side="CALL",
+            quantity=10, avg_premium=17.61, open_date="2026-04-01",
+        )
+        store.insert_option_transaction(
+            option_position_id=oid_a, symbol="QQQ", expiration="2026-09-18",
+            strike=410.0, side="PUT", action="STO", quantity=10,
+            premium=4.78, date="2026-04-01",
+        )
+        store.insert_option_transaction(
+            option_position_id=oid_b, symbol="EWY", expiration="2026-07-17",
+            strike=160.0, side="CALL", action="BTO", quantity=10,
+            premium=17.61, date="2026-04-01",
+        )
+        only_a = store.get_option_transactions(option_position_id=oid_a)
+        assert len(only_a) == 1
+        assert only_a[0]["symbol"] == "QQQ"
+
+    def test_option_position_realized_pnl_defaults_zero(self, store):
+        store.upsert_company("QQQ", company_name="Invesco QQQ Trust")
+        store.insert_option_position(
+            symbol="QQQ", expiration="2026-09-18", strike=410.0, side="PUT",
+            quantity=-10, avg_premium=4.78, open_date="2026-04-01",
+        )
+        pos = store.get_open_option_positions()
+        assert pos[0]["realized_pnl"] == 0
+
+    def test_reject_duplicate_open_option_contract_same_strategy(self, store):
+        store.upsert_company("QQQ", company_name="Invesco QQQ Trust")
+        store.insert_option_position(
+            symbol="QQQ", expiration="2026-09-18", strike=410.0, side="PUT",
+            quantity=-10, avg_premium=4.78, open_date="2026-04-01",
+            strategy_tag="tail_hedge",
+        )
+        with pytest.raises(Exception):  # UNIQUE partial index
+            store.insert_option_position(
+                symbol="QQQ", expiration="2026-09-18", strike=410.0, side="PUT",
+                quantity=-5, avg_premium=5.0, open_date="2026-04-02",
+                strategy_tag="tail_hedge",
+            )
+
+    def test_allow_duplicate_open_with_different_strategy_tag(self, store):
+        store.upsert_company("QQQ", company_name="Invesco QQQ Trust")
+        store.insert_option_position(
+            symbol="QQQ", expiration="2026-09-18", strike=410.0, side="PUT",
+            quantity=-10, avg_premium=4.78, open_date="2026-04-01",
+            strategy_tag="tail_hedge",
+        )
+        # Different strategy tag → should be allowed (new identity)
+        store.insert_option_position(
+            symbol="QQQ", expiration="2026-09-18", strike=410.0, side="PUT",
+            quantity=-5, avg_premium=5.0, open_date="2026-04-02",
+            strategy_tag="theta_carry",
+        )
+        all_pos = store.get_open_option_positions(symbol="QQQ")
+        assert len(all_pos) == 2
+
+
 class TestCheckpoint:
     def test_checkpoint_company_db(self, store):
         """checkpoint should not raise."""
