@@ -1,11 +1,7 @@
 #!/usr/bin/env bash
-# Daily market data + report pipeline for cloud cron.
-#
-# Deprecated after the cron split into:
-# - run_market_data_pipeline.sh
-# - run_market_report_pipeline.sh
-#
-# Kept as a compatibility wrapper for manual use.
+# Daily market data collection pipeline for cloud cron.
+# Runs the data-only chain serially:
+# pool price -> broad non-pool price -> pool IV.
 
 set -euo pipefail
 
@@ -33,11 +29,9 @@ run_step() {
   log_step "OK $name"
 }
 
-log_step "daily market pipeline START"
+log_step "daily market data pipeline START"
 run_step "pool_price_fmp" "$PYTHON" scripts/update_data.py --price
 run_step "broad_price_yfinance" "$PYTHON" scripts/update_extended_prices.py \
   --universe broad --incremental --incremental-days "$BROAD_INCREMENTAL_DAYS"
 run_step "pool_options_iv" "$PYTHON" scripts/update_options_iv.py
-run_step "broad_market_scan" "$PYTHON" scripts/broad_market_scan.py
-run_step "morning_report" "$PYTHON" scripts/morning_report.py --no-social
-log_step "daily market pipeline DONE"
+log_step "daily market data pipeline DONE"
