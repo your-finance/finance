@@ -43,3 +43,4 @@ forge/logs/
 *.pdf
 *.backup.*
 trading-memo.html
+.lh/

@@ -683,12 +683,13 @@ data/
 ### Python Dependencies
 
 ```
-numpy>=2.4          # Numerical computing (indicators, correlation)
-pandas>=3.0         # Data manipulation (price, financials)
+numpy>=1.26,<2.1   # Numerical computing (Python 3.9 compatible)
+pandas>=2.3,<3.0   # Data manipulation (Python 3.9 compatible)
+scipy>=1.13,<1.14  # Statistical tests (Python 3.9 compatible)
 requests>=2.32      # HTTP client (FMP + FRED APIs)
 yfinance>=0.2.28    # Forward estimates (analyst consensus, price targets)
 python-dateutil>=2.9 # Date parsing
-python-dotenv       # Environment variables
+python-dotenv>=1.0  # Environment variables
 ```
 
 ---
